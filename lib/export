@@ -1,33 +1,41 @@
 #!/bin/bash
-# wt export <name>
+# grove export <name>
 # Generate anonymization draft for a worktree's PLAN.md.
-# Useful when wt rm was run without auto-export, or to refresh a draft.
+# Useful when grove rm ran without auto-export, or to refresh a draft.
 #
 # Source priority:
-#   1. ~/Projects/archive/<name>/PLAN.md  (already archived — most common)
-#   2. ~/Projects/worktrees/<name>/PLAN.md (still active)
+#   1. $GROVE_ARCHIVE/<name>/PLAN.md  (already archived — most common)
+#   2. $GROVE_TREES/<name>/PLAN.md    (still active)
 #
-# Output: ~/wlog/cases/<YYYY-Q[N]>-<name>.draft.md
-#         (gitignored by wlog until user anonymizes and renames .draft → .md)
+# Output: $GROVE_CASEBOOK/<YYYY-Q[N]>-<name>.draft.md
+#         (the .draft suffix keeps it out of git until anonymised)
 . "$(cd "$(dirname "$0")" && pwd)/config"
 
 set -euo pipefail
+
+# 비어 있으면 회고 기능이 꺼진 것. dirname "" 는 "." 이라 존재 검사를 통과해버림
+if [ -z "${GROVE_CASEBOOK:-}" ]; then
+  say "Retrospectives are off — set GROVE_CASEBOOK to enable them." \
+      "회고 기능이 꺼져 있음 — GROVE_CASEBOOK 을 채우면 켜짐" >&2
+  exit 1
+fi
 
 WLOG_ROOT="$(dirname "$GROVE_CASEBOOK")"
 WLOG_CASES="$GROVE_CASEBOOK"
 
 usage() {
-  cat <<'EOF'
-Usage: wt export [--force] <name>
+  cat <<EOF
+Usage: grove export [--force] <name>
 
-Generate anonymization draft in ~/wlog/cases/ from a worktree's PLAN.md.
+Generate an anonymisation draft in $GROVE_CASEBOOK from a worktree's PLAN.md.
 
 Source priority:
-  1. ~/Projects/archive/<name>/PLAN.md  (already archived)
-  2. ~/Projects/worktrees/<name>/PLAN.md (still active)
+  1. $GROVE_ARCHIVE/<name>/PLAN.md  (already archived)
+  2. $GROVE_TREES/<name>/PLAN.md    (still active)
 
-Output: ~/wlog/cases/<YYYY-Q[N]>-<name>.draft.md
-        Gitignored by wlog until user anonymizes and renames .draft → .md.
+Output: $GROVE_CASEBOOK/<YYYY-Q[N]>-<name>.draft.md
+        The .draft suffix is there so your casebook's .gitignore blocks it
+        until you have anonymised it and renamed .draft → .md
 
 Options:
   --force    Overwrite existing draft if present
@@ -68,9 +76,9 @@ if [[ -z "$plan_file" ]]; then
   exit 1
 fi
 
-# Verify wlog repo present
+# Verify the casebook directory exists
 if [[ ! -d "$WLOG_ROOT" ]]; then
-  echo "Error: $WLOG_ROOT not found. Set up personal wlog repo first (see ~/wlog/README.md)."
+  sayf "Error: %s not found. Create it, or point GROVE_CASEBOOK somewhere else.\n" "오류: %s 가 없음. 만들거나 GROVE_CASEBOOK 을 다른 곳으로 돌릴 것\n" "$WLOG_ROOT" >&2
   exit 1
 fi
 

@@ -4,19 +4,19 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: wt rm [--no-archive] [--keep-branches] [--no-export-personal] <name>
+Usage: grove rm [--no-archive] [--keep-branches] [--no-export-personal] <name>
 
-Archives documents and removes all worktrees under $HOME/Projects/worktrees/<name>/.
-After removal, attempts to delete merged local branches in each affected repo.
+Archives the documents and removes every worktree under <name>/.
+Afterwards it tries to delete merged local branches in each affected repo.
 
-By default also exports an anonymization draft to ~/wlog/cases/<YYYY-Q[N]>-<name>.draft.md
-(gitignored by wlog until user manually anonymizes and renames to drop .draft suffix).
-Skip ~/wlog setup automatically detected — exports just become a no-op if ~/wlog is missing.
+If GROVE_CASEBOOK is set it also writes a retrospective draft there, suffixed
+.draft.md so your casebook's .gitignore keeps it out of git until anonymised.
+Leave GROVE_CASEBOOK empty and this step is skipped entirely.
 
 Options:
   --no-archive             Skip archiving documents before removal
   --keep-branches          Skip post-removal merged-branch cleanup
-  --no-export-personal     Skip auto-export to ~/wlog/cases/ (rarely needed)
+  --no-export-personal     Skip the retrospective draft (rarely needed)
 EOF
   exit 1
 }
@@ -88,7 +88,7 @@ if [[ "$no_archive" == false ]]; then
 
   files_to_archive=()
   for f in "$wt_dir"/*; do
-    [[ ! -f "$f" ]] && continue
+    [[ ! -f "$f" && ! -L "$f" ]] && continue
     fname=$(basename "$f")
     [[ "$fname" == "CLAUDE.md" || "$fname" == "AGENTS.md" ]] && continue
     files_to_archive+=("$f")
@@ -106,32 +106,38 @@ if [[ "$no_archive" == false ]]; then
   fi
 fi
 
-# Export anonymization draft to personal wlog (~/wlog/cases/)
-# Safety net: file is saved with .draft.md suffix which wlog/.gitignore blocks from push
+# 회고 draft 를 GROVE_CASEBOOK 아래에 씀
+# .draft.md 접미사가 안전장치 — 익명화 전에는 casebook 의 .gitignore 가 막음
+# GROVE_CASEBOOK 이 비어 있으면 회고 기능 자체가 꺼진 것. 여기서 걸러내지 않으면
+# dirname "" 가 "." 이라 존재 검사를 통과해버리고 mkdir "" 에서 죽음 (set -e)
+if [[ -z "${GROVE_CASEBOOK:-}" ]]; then
+  export_personal=false
+fi
+
 if [[ "$export_personal" == true ]]; then
   if [[ "$no_archive" == true ]]; then
     echo ""
     echo "Warning: --export-personal requires archived PLAN.md but --no-archive is set. Skipping export."
   else
     plan_file="$GROVE_ARCHIVE/$name/PLAN.md"
-    wlog_root="$(dirname "$GROVE_CASEBOOK")"
-    wlog_cases="$GROVE_CASEBOOK"
+    case_root="$(dirname "$GROVE_CASEBOOK")"
+    case_dir="$GROVE_CASEBOOK"
 
-    if [[ ! -d "$wlog_root" ]]; then
+    if [[ ! -d "$case_root" ]]; then
       echo ""
-      echo "Warning: $wlog_root not found. Set up personal wlog repo first (see ~/wlog/README.md). Skipping export."
+          sayf "Warning: %s not found — skipping the retrospective draft\n" "경고: %s 가 없어 회고 draft 를 건너뜀\n" "$case_root"
     elif [[ ! -f "$plan_file" ]]; then
       echo ""
       echo "Warning: $plan_file not found. Skipping personal export."
     else
-      mkdir -p "$wlog_cases"
+      mkdir -p "$case_dir"
 
       # Quarter from current date (YYYY-Q[1-4])
       year=$(date +%Y)
       month_num=$((10#$(date +%m)))
       quarter=$(( (month_num - 1) / 3 + 1 ))
 
-      draft_file="$wlog_cases/${year}-Q${quarter}-${name}.draft.md"
+      draft_file="$case_dir/${year}-Q${quarter}-${name}.draft.md"
 
       if [[ -f "$draft_file" ]]; then
         echo ""
@@ -154,7 +160,8 @@ fi
 
 # Remove remaining top-level files
 for f in "$wt_dir"/*; do
-  [[ -f "$f" ]] && rm "$f"
+  # -f 는 깨진 symlink 를 놓침. -L 을 같이 봐야 디렉토리가 비워짐
+  [[ -f "$f" || -L "$f" ]] && rm "$f"
 done
 
 # Remove hidden files

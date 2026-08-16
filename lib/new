@@ -162,10 +162,22 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cp "$SCRIPT_DIR/../templates/PLAN.md" "$wt_dir/PLAN.md"
 cp "$SCRIPT_DIR/../templates/MERGE_REQUESTS.md" "$wt_dir/MERGE_REQUESTS.md"
-cp "$SCRIPT_DIR/../templates/CLAUDE.md" "$wt_dir/CLAUDE.md"
-# AGENTS.md 는 codex 등이 읽음. @import 를 해석하지 못할 수 있으므로 실제 내용을 심볼릭으로 연결
-# (CLAUDE.md 는 @import, AGENTS.md 는 symlink — 둘 다 ~/.claude/worktree-agent.md 하나를 봄)
-ln -sfn "$HOME/.claude/worktree-agent.md" "$wt_dir/AGENTS.md"
+if [[ -f "$HOME/.claude/worktree-agent.md" ]]; then
+  cp "$SCRIPT_DIR/../templates/CLAUDE.md" "$wt_dir/CLAUDE.md"
+else
+  # @import 대상이 없으면 옆에 놓인 AGENTS.md 를 가리킴
+  printf '# 작업 지침\n\n@./AGENTS.md\n' > "$wt_dir/CLAUDE.md"
+fi
+# AGENTS.md 는 codex 등이 읽음 (@import 를 해석 못 할 수 있어 실제 내용이 필요함).
+# 개인 지침 파일을 쓰는 사람은 그걸 symlink 해서 출처를 하나로 두고,
+# 없으면 패키지 템플릿을 복사함. 없는 경로로 symlink 를 걸면 깨진 링크가 남아
+# 나중에 grove rm 이 디렉토리를 못 지움
+AGENT_DOC="$HOME/.claude/worktree-agent.md"
+if [[ -f "$AGENT_DOC" ]]; then
+  ln -sfn "$AGENT_DOC" "$wt_dir/AGENTS.md"
+else
+  cp "$SCRIPT_DIR/../templates/AGENTS.md" "$wt_dir/AGENTS.md"
+fi
 
 echo ""
 sayf "Worktree created at: %s\n" "워크트리 생성됨: %s\n" "$wt_dir"
