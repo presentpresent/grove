@@ -148,13 +148,13 @@ msg="$(sayf \
 
   %s
 
-Answer it. If the answer changes the contract, update the contract section of PLAN.md — the change will be broadcast to every repo session automatically. If it does not, reply to `%s` with grove tell.' \
+Answer it. If the answer changes the contract, update the contract section of PLAN.md — the change will be broadcast to every repo session automatically. If it does not, answer that repo alone with `grove tell <task> --to %s "answer"` so the others are not woken.' \
 '`%s` 가 확인을 요청했다. 워크트리 루트의 QUESTIONS.md 에 있음:
 
   %s
 
 답을 정해라. 계약이 바뀌는 답이면 PLAN.md 의 계약 절을 고칠 것 — 그러면 레포
-세션 전부에 자동으로 통지됨. 계약이 안 바뀌면 grove tell 로 `%s` 에게만 답할 것.' \
+세션 전부에 자동으로 통지됨. 계약이 안 바뀌면 `grove tell <작업명> --to %s "답"` 으로 그 레포에만 답할 것 (전체를 깨우지 않음).' \
 "$from" "$question" "$from")"
 
 if herdr agent prompt "$plan_pane" "$msg" >/dev/null 2>&1; then

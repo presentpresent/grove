@@ -90,19 +90,50 @@ if [ "${GROVE_MUX:-herdr}" != "herdr" ]; then
 fi
 command -v herdr >/dev/null || { say "❌ herdr is not installed" "❌ herdr 미설치" >&2; exit 1; }
 
+# PLAN.md 의 "실행 설정" 표에서 레포별 모델·노력을 읽음.
+#
+#   ## 실행 설정
+#   | 레포 | 모델 | 노력 |
+#   |---|---|---|
+#   | api-server | opus | high |
+#
+# 어느 레포가 어려운지 아는 건 계획 세션뿐이라, 결정을 거기 두고 여기서 읽음.
+# 표가 없거나 파싱이 안 되면 빈 값 → 세션 기본 모델·노력이 그대로 쓰임 (안전한 실패)
+exec_conf() {   # exec_conf <레포> → "모델<TAB>노력"
+    [ -f "$WT/PLAN.md" ] || return 0
+    awk -F'|' -v repo="$1" '
+        /^##+[ \t]*(실행 설정|Exec settings)/ { inside = 1; next }
+        /^##[ \t]/ && inside                  { inside = 0 }
+        inside && NF >= 4 {
+            for (i = 2; i <= 4; i++) gsub(/^[ \t]+|[ \t]+$/, "", $i)
+            if ($2 == repo) { print $3 "\t" $4; exit }
+        }' "$WT/PLAN.md" 2>/dev/null
+}
+
 # 에이전트마다 받는 플래그가 다름. herdr 는 22종을 띄울 수 있지만 CLI 인자는 제각각임
-#   claude  --name(세션 이름) · --add-dir
-#   codex   --add-dir 만 (--name 없음)
+#   claude  --name(세션 이름) · --add-dir · --model · --effort
+#   codex   --add-dir · -m (이름·노력 옵션 없음)
 #   그 외   모르는 플래그를 넘기면 기동 자체가 실패하므로 아무것도 안 넘김
 # herdr 쪽 세션 이름은 `agent start <NAME>` 이 따로 잡아주므로 --name 이 없어도
 # grove tell 은 동작함 (대상은 cwd 로 찾음)
+#
+# 모델·노력은 호출 전에 EXEC_MODEL·EXEC_EFFORT 로 넘김 (비어 있으면 안 붙임)
 agent_args() {
     local session="$1"; shift          # 나머지는 --add-dir 짝
     case "$AGENT" in
-        claude) printf '%s\n' --name "$session" "$@" ;;
-        codex)  printf '%s\n' "$@" ;;
-        *)      : ;;
+        claude)
+            printf '%s\n' --name "$session"
+            [ -n "${EXEC_MODEL:-}" ]  && printf '%s\n' --model "$EXEC_MODEL"
+            [ -n "${EXEC_EFFORT:-}" ] && printf '%s\n' --effort "$EXEC_EFFORT"
+            printf '%s\n' "$@"
+            ;;
+        codex)
+            [ -n "${EXEC_MODEL:-}" ] && printf '%s\n' -m "$EXEC_MODEL"
+            printf '%s\n' "$@"
+            ;;
+        *) : ;;
     esac
+    return 0
 }
 
 # 레포 담당 세션에 주입할 계약 프롬프트
@@ -274,6 +305,8 @@ for ((i = 0; i < n; i++)); do
     session="$NAME-$repo"
 
     # --name 으로 세션 이름을 박아둬야 나중에 다른 세션에서 지목해 메시지를 보낼 수 있음
+    EXEC_MODEL=""; EXEC_EFFORT=""
+    IFS=$'\t' read -r EXEC_MODEL EXEC_EFFORT < <(exec_conf "$repo")
     extra=(); while IFS= read -r x; do extra+=("$x"); done < <(agent_args "$session")
     if ! herdr agent start "$session" --kind "$AGENT" --pane "${panes[$i]}" \
             -- "${extra[@]+"${extra[@]}"}" >/dev/null 2>&1; then
@@ -282,7 +315,9 @@ for ((i = 0; i < n; i++)); do
     fi
 
     if herdr agent prompt "$session" "$(contract_prompt "$repo")" >/dev/null 2>&1; then
-        sayf "  ✅ %s  (session: %s)\n" "  ✅ %s  (세션명: %s)\n" "$repo" "$session"
+        tag=""
+        [ -n "$EXEC_MODEL" ] || [ -n "$EXEC_EFFORT" ] && tag=" [${EXEC_MODEL:-default}${EXEC_EFFORT:+/$EXEC_EFFORT}]"
+        sayf "  ✅ %s  (session: %s)%s\n" "  ✅ %s  (세션명: %s)%s\n" "$repo" "$session" "$tag"
     else
         sayf "  ⚠️  %s started, but the prompt did not go through — instruct it in that pane\n" "  ⚠️  %s 기동은 됐으나 프롬프트 주입 실패 — 해당 페인에 직접 지시\n" "$repo"
     fi

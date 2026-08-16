@@ -21,6 +21,7 @@ $GROVE_TREES/<작업명>/ 아래에서 도는 레포 담당 세션 전부에게 
 
 옵션:
   --all       계획 세션에도 보냄 (기본은 레포 세션만)
+  --to <레포>  그 레포 세션에만 보냄 (질문에 답할 때 — 전체를 깨우지 않음)
   --dry-run   누구에게 갈지만 보여주고 보내지 않음
 
 예: grove tell checkout "계약 바뀜 — PLAN.md 의 응답 스키마 절 다시 볼 것"
@@ -34,6 +35,7 @@ $GROVE_TREES/<name>/. With no message, a default "re-read PLAN.md" is sent.
 
 Options:
   --all       also send to the planning session (default: repo sessions only)
+  --to <repo> send only to that repo's session (answering one question without waking the rest)
   --dry-run   show who would receive it, send nothing
 
 Example: grove tell checkout "contract changed — re-read the response schema in PLAN.md"
@@ -44,10 +46,12 @@ EOF
 
 include_plan=0
 dry_run=0
+only_repo=""
 positional=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --all)     include_plan=1; shift ;;
+    --to)      only_repo="$2"; shift 2 ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help) usage ;;
     *)         positional+=("$1"); shift ;;
@@ -101,6 +105,9 @@ for a in agents:
 sent=0
 while IFS=$'\t' read -r pane role label; do
   [ -n "$pane" ] || continue
+  if [ -n "$only_repo" ] && [ "$label" != "$only_repo" ]; then
+    continue
+  fi
   if [ "$role" = plan ] && [ "$include_plan" = 0 ]; then
     sayf "  skip %-8s %s (planning session; --all to include)\n" "  건너뜀 %-8s %s (계획 세션, --all 이면 포함)\n" "$pane" "$label"
     continue
