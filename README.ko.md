@@ -93,7 +93,15 @@ GROVE_REPOS=~/other grove ls
 
 ## 화면
 
-`grove open` 은 [herdr](https://github.com/herdrdev/herdr) 를 씀. tmux·zellij 도 감지하지만 페인 자동 배치는 herdr 에서만 동작함. 없어도 나머지 명령은 그대로 굴러감
+`grove open` 과 `grove tell`, `grove ask` 의 알림 부분만 [herdr](https://github.com/herdrdev/herdr) 를 씀. 나머지(`new` `add` `ls` `rm` `export` `init`)는 순수 git 이라 herdr 없이 돌아감
+
+| | herdr 없을 때 |
+|---|---|
+`new` `add` `ls` `rm` `export` `init` | 정상 동작 |
+`ask` | QUESTIONS.md 기록은 되고 알림만 생략 |
+`tell` `open` | 명확한 메시지와 함께 실패 |
+
+tmux·zellij 는 `grove init` 이 감지하지만 페인 배치는 못 함. herdr 만 됨
 
 ## 알아둘 것
 

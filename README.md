@@ -105,7 +105,18 @@ Both are written in Korean. The model reads them fine either way, but `grove ini
 
 ## Screen layout
 
-`grove open` drives [herdr](https://github.com/herdrdev/herdr). tmux and zellij are detected, but automatic pane layout only works under herdr. Without any of them the other commands still work.
+`grove open`, `grove tell` and the notification half of `grove ask` drive
+[herdr](https://github.com/herdrdev/herdr). Everything else — `new`, `add`,
+`ls`, `rm`, `export`, `init` — is plain git and works with no herdr installed.
+
+| | without herdr |
+|---|---|
+| `new` `add` `ls` `rm` `export` `init` | work normally |
+| `ask` | records the question in QUESTIONS.md, skips the notification |
+| `tell` `open` | fail with a clear message |
+
+tmux and zellij are detected by `grove init` but cannot lay out panes; only
+herdr can.
 
 ## Caveats
 

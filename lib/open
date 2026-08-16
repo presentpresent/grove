@@ -81,6 +81,13 @@ WT="$WT_ROOT/$NAME"
 [ -d "$WT" ] || { sayf "❌ No such worktree: %s\n" "❌ 워크트리 없음: %s\n" "$WT" >&2
                   sayf "   available: %s\n" "   목록: %s\n" "$(ls "$WT_ROOT" | tr '\n' ' ')" >&2; exit 1; }
 
+# 페인 자동 배치는 herdr 만 지원함. GROVE_MUX 가 다른 값이면 설정이 조용히
+# 무시되는 게 아니라 그렇다고 말해줌
+if [ "${GROVE_MUX:-herdr}" != "herdr" ]; then
+    sayf "❌ GROVE_MUX=%s — only herdr can lay out panes\n" "❌ GROVE_MUX=%s — 페인 자동 배치는 herdr 만 됨\n" "$GROVE_MUX" >&2
+    say  "   Other grove commands work regardless." "   나머지 grove 명령은 그대로 동작함" >&2
+    exit 1
+fi
 command -v herdr >/dev/null || { say "❌ herdr is not installed" "❌ herdr 미설치" >&2; exit 1; }
 
 # 에이전트마다 받는 플래그가 다름. herdr 는 22종을 띄울 수 있지만 CLI 인자는 제각각임
