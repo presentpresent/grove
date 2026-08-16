@@ -1,0 +1,123 @@
+#!/bin/bash
+. "$(cd "$(dirname "$0")" && pwd)/config"
+set -euo pipefail
+
+usage() {
+  if grove_is_ko; then
+  cat <<EOF
+사용법: grove add [--base <브랜치>] <작업명> <repo>…
+
+이미 있는 $GROVE_TREES/<작업명>/ 에 레포를 더 심음
+브랜치는 그 안에 있던 워크트리에서 그대로 물려받음
+
+레포는 GROVE_REPOS 의 각 경로 바로 아래에서 찾음:
+$(grove_repo_paths | sed 's/^/  /')
+
+옵션:
+  --base <브랜치>  이 브랜치에서 따냄 (기본: 레포의 현재 HEAD)
+
+예: grove add --base master guest-checkout catalog-service
+EOF
+  else
+  cat <<EOF
+Usage: grove add [--base <branch>] <name> <repo>…
+
+Adds more repos to an existing $GROVE_TREES/<name>/
+The branch is inherited from the worktrees already there
+
+Repos are looked up directly under each GROVE_REPOS path:
+$(grove_repo_paths | sed 's/^/  /')
+
+Options:
+  --base <branch>  branch off this instead of the repo's current HEAD
+
+Example: grove add --base master guest-checkout catalog-service
+EOF
+  fi
+  exit 1
+}
+
+base_branch=""
+
+positional=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --base)
+      base_branch="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      positional+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${positional[@]+"${positional[@]}"}"
+
+if [[ $# -lt 2 ]]; then
+  usage
+fi
+
+name="$1"
+shift
+wt_dir="$GROVE_TREES/$name"
+
+if [[ ! -d "$wt_dir" ]]; then
+  sayf "Error: worktree directory does not exist: %s\n" "오류: 워크트리 디렉토리가 없음: %s\n" "$wt_dir" >&2
+  say  "Create it first with grove new." "먼저 grove new 로 만들 것" >&2
+  exit 1
+fi
+
+# Reuse the same branch as existing worktrees (read from any repo subdirectory)
+branch=""
+for sub in "$wt_dir"/*/; do
+  [[ -f "$sub/.git" ]] || continue
+  branch=$(git -C "$sub" branch --show-current 2>/dev/null)
+  [[ -n "$branch" ]] && break
+done
+
+if [[ -z "$branch" ]]; then
+  sayf "Error: cannot infer a branch from the worktrees in %s\n" "오류: %s 안의 워크트리에서 브랜치를 알아낼 수 없음\n" "$wt_dir" >&2
+  say  "Use grove new instead." "grove new 를 쓸 것" >&2
+  exit 1
+fi
+
+sayf "Using branch: %s\n" "쓸 브랜치: %s\n" "$branch"
+
+for repo in "$@"; do
+  if [[ -d "$wt_dir/$repo" ]]; then
+    sayf "Warning: '%s' is already in %s, skipping\n" "경고: '%s' 는 이미 %s 에 있음, 건너뜀\n" "$repo" "$wt_dir"
+    continue
+  fi
+
+  matches=$(grove_find_repo "$repo")
+  match_count=$(echo -n "$matches" | grep -c '^' || true)
+
+  if [[ "$match_count" -eq 0 ]]; then
+    sayf "Warning: repo '%s' not found in GROVE_REPOS, skipping\n" "경고: 레포 '%s' 를 GROVE_REPOS 에서 못 찾음, 건너뜀\n" "$repo"
+    continue
+  elif [[ "$match_count" -gt 1 ]]; then
+    sayf "Warning: multiple matches for '%s', using the first:\n" "경고: '%s' 에 여러 개가 걸림, 첫 번째를 씀:\n" "$repo"
+    echo "$matches"
+  fi
+
+  repo_path=$(echo "$matches" | head -1)
+
+  sayf "Adding worktree for %s on branch %s…\n" "%s 워크트리 추가 중 (브랜치 %s)…\n" "$repo" "$branch"
+  if [[ -n "$base_branch" ]]; then
+    git -C "$repo_path" fetch origin "$base_branch" 2>/dev/null || true
+    git -C "$repo_path" worktree add "$wt_dir/$repo" -b "$branch" "origin/$base_branch"
+  else
+    git -C "$repo_path" worktree add "$wt_dir/$repo" -b "$branch" 2>/dev/null \
+      || git -C "$repo_path" worktree add "$wt_dir/$repo" "$branch"
+  fi
+
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  "$SCRIPT_DIR/setup-deps" "$repo_path" "$wt_dir/$repo" || true
+done
+
+echo ""
+sayf "Added to: %s\n" "추가됨: %s\n" "$wt_dir"

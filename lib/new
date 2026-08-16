@@ -1,0 +1,173 @@
+#!/bin/bash
+. "$(cd "$(dirname "$0")" && pwd)/config"
+set -euo pipefail
+
+usage() {
+  if grove_is_ko; then
+    cat <<EOF
+사용법: grove new [--type <종류>] [--base <브랜치>] [--branch <이름>] <작업명> <repo>…
+
+$GROVE_TREES/<작업명>/ 아래에 레포별 워크트리를 만듦
+
+레포는 GROVE_REPOS 의 각 경로 바로 아래에서 찾음:
+$(grove_repo_paths | sed 's/^/  /')
+
+이름 규칙:
+  <작업명>   워크트리 디렉토리명. 짧은 영문 케밥, prefix 없음
+             예: checkout-redesign · search-latency · guest-checkout
+  브랜치     GROVE_BRANCH 템플릿 = $GROVE_BRANCH
+             {type} 은 --type, {name} 은 <작업명> 으로 치환됨
+
+옵션:
+  --type <종류>    작업 종류. 기본 $GROVE_TYPE
+                   쓸 수 있는 값: ${GROVE_TYPES//,/ }
+  --base <브랜치>  이 브랜치에서 따냄 (기본: 레포의 현재 HEAD)
+  --branch <이름>  템플릿을 무시하고 브랜치 이름을 통째로 지정
+
+예:
+  grove new checkout-redesign notification-worker
+    → 디렉토리: $GROVE_TREES/checkout-redesign
+    → 브랜치:   $(grove_branch checkout-redesign)
+
+  grove new --hotfix payment-rollback billing-service
+    → 브랜치:   $(grove_branch payment-rollback hotfix)
+
+  grove new --type chore ci-cache-fix api-server
+
+  grove new --base release/4.5.0 search-latency web-bff
+EOF
+  else
+    cat <<EOF
+Usage: grove new [--type <type>] [--base <branch>] [--branch <name>] <name> <repo>…
+
+Creates one worktree per repo under $GROVE_TREES/<name>/
+
+Repos are looked up directly under each GROVE_REPOS path:
+$(grove_repo_paths | sed 's/^/  /')
+
+Naming:
+  <name>     the worktree directory. Short kebab-case, no prefix
+             e.g. checkout-redesign · search-latency · guest-checkout
+  branch     from the GROVE_BRANCH template = $GROVE_BRANCH
+             {type} comes from --type, {name} from <name>
+
+Options:
+  --type <type>      work type. Default $GROVE_TYPE
+                     allowed: ${GROVE_TYPES//,/ }
+  --base <branch>    branch off this instead of the repo's current HEAD
+  --branch <name>    ignore the template and set the branch name outright
+
+Examples:
+  grove new checkout-redesign notification-worker
+    → directory: $GROVE_TREES/checkout-redesign
+    → branch:    $(grove_branch checkout-redesign)
+
+  grove new --hotfix payment-rollback billing-service
+    → branch:    $(grove_branch payment-rollback hotfix)
+
+  grove new --type chore ci-cache-fix api-server
+
+  grove new --base release/4.5.0 search-latency web-bff
+EOF
+  fi
+  exit 1
+}
+
+base_branch=""
+branch=""
+type="$GROVE_TYPE"
+
+positional=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --base)
+      base_branch="$2"
+      shift 2
+      ;;
+    --type)
+      type="$2"
+      shift 2
+      ;;
+    --branch)
+      branch="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      positional+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${positional[@]+"${positional[@]}"}"
+
+if [[ $# -lt 2 ]]; then
+  usage
+fi
+
+if ! grove_type_valid "$type"; then
+  sayf "❌ Unknown work type: %s\n" "❌ 모르는 작업 종류: %s\n" "$type" >&2
+  sayf "   allowed: %s\n" "   쓸 수 있는 값: %s\n" "${GROVE_TYPES//,/ }" >&2
+  say  "   (add more in GROVE_TYPES)" "   (GROVE_TYPES 에 추가하면 늘릴 수 있음)" >&2
+  exit 1
+fi
+
+name="$1"
+shift
+[[ -n "$branch" ]] || branch="$(grove_branch "$name" "$type")"
+wt_dir="$GROVE_TREES/$name"
+
+# 템플릿에 {type} 이 없으면 --type 이 조용히 사라짐. 짚고 넘어감
+if [[ "$GROVE_BRANCH" != *'{type}'* && "$type" != "$GROVE_TYPE" ]]; then
+  sayf "⚠️  GROVE_BRANCH has no {type}, so --type %s is ignored: %s\n" \
+       "⚠️  GROVE_BRANCH 에 {type} 이 없어 --type %s 이 반영되지 않음: %s\n" "$type" "$branch" >&2
+fi
+
+if [[ -d "$wt_dir" ]]; then
+  sayf "Error: worktree directory already exists: %s\n" "오류: 워크트리 디렉토리가 이미 있음: %s\n" "$wt_dir" >&2
+  exit 1
+fi
+
+mkdir -p "$wt_dir"
+
+for repo in "$@"; do
+  matches=$(grove_find_repo "$repo")
+  match_count=$(echo -n "$matches" | grep -c '^' || true)
+
+  if [[ "$match_count" -eq 0 ]]; then
+    sayf "Warning: repo '%s' not found in GROVE_REPOS, skipping\n" "경고: 레포 '%s' 를 GROVE_REPOS 에서 못 찾음, 건너뜀\n" "$repo"
+    continue
+  elif [[ "$match_count" -gt 1 ]]; then
+    sayf "Warning: multiple matches for '%s', using the first:\n" "경고: '%s' 에 여러 개가 걸림, 첫 번째를 씀:\n" "$repo"
+    echo "$matches"
+  fi
+
+  repo_path=$(echo "$matches" | head -1)
+
+  sayf "Creating worktree for %s on branch %s…\n" "%s 워크트리 생성 중 (브랜치 %s)…\n" "$repo" "$branch"
+  if [[ -n "$base_branch" ]]; then
+    git -C "$repo_path" fetch origin "$base_branch" 2>/dev/null || true
+    git -C "$repo_path" worktree add "$wt_dir/$repo" -b "$branch" "origin/$base_branch"
+  else
+    git -C "$repo_path" worktree add "$wt_dir/$repo" -b "$branch" 2>/dev/null \
+      || git -C "$repo_path" worktree add "$wt_dir/$repo" "$branch"
+  fi
+
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  "$SCRIPT_DIR/setup-deps" "$repo_path" "$wt_dir/$repo" || true
+done
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cp "$SCRIPT_DIR/../templates/PLAN.md" "$wt_dir/PLAN.md"
+cp "$SCRIPT_DIR/../templates/MERGE_REQUESTS.md" "$wt_dir/MERGE_REQUESTS.md"
+cp "$SCRIPT_DIR/../templates/CLAUDE.md" "$wt_dir/CLAUDE.md"
+# AGENTS.md 는 codex 등이 읽음. @import 를 해석하지 못할 수 있으므로 실제 내용을 심볼릭으로 연결
+# (CLAUDE.md 는 @import, AGENTS.md 는 symlink — 둘 다 ~/.claude/worktree-agent.md 하나를 봄)
+ln -sfn "$HOME/.claude/worktree-agent.md" "$wt_dir/AGENTS.md"
+
+echo ""
+sayf "Worktree created at: %s\n" "워크트리 생성됨: %s\n" "$wt_dir"
+sayf "Branch: %s\n" "브랜치: %s\n" "$branch"
+sayf "Describe the work in %s\n" "무슨 작업인지 %s 에 적을 것\n" "$wt_dir/PLAN.md"

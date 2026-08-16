@@ -1,0 +1,204 @@
+#!/bin/bash
+. "$(cd "$(dirname "$0")" && pwd)/config"
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: wt rm [--no-archive] [--keep-branches] [--no-export-personal] <name>
+
+Archives documents and removes all worktrees under $HOME/Projects/worktrees/<name>/.
+After removal, attempts to delete merged local branches in each affected repo.
+
+By default also exports an anonymization draft to ~/wlog/cases/<YYYY-Q[N]>-<name>.draft.md
+(gitignored by wlog until user manually anonymizes and renames to drop .draft suffix).
+Skip ~/wlog setup automatically detected — exports just become a no-op if ~/wlog is missing.
+
+Options:
+  --no-archive             Skip archiving documents before removal
+  --keep-branches          Skip post-removal merged-branch cleanup
+  --no-export-personal     Skip auto-export to ~/wlog/cases/ (rarely needed)
+EOF
+  exit 1
+}
+
+no_archive=false
+keep_branches=false
+export_personal=true
+
+positional=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-archive)
+      no_archive=true
+      shift
+      ;;
+    --keep-branches)
+      keep_branches=true
+      shift
+      ;;
+    --export-personal)
+      # Backward-compat: explicit opt-in still accepted (now default-on)
+      export_personal=true
+      shift
+      ;;
+    --no-export-personal)
+      export_personal=false
+      shift
+      ;;
+    -h|--help)
+      usage
+      ;;
+    -*)
+      usage
+      ;;
+    *)
+      positional+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${positional[@]+"${positional[@]}"}"
+
+if [[ $# -ne 1 ]]; then
+  usage
+fi
+
+name="$1"
+wt_dir="$GROVE_TREES/$name"
+
+if [[ ! -d "$wt_dir" ]]; then
+  echo "Error: worktree directory not found: $wt_dir"
+  exit 1
+fi
+
+# Capture branch + repo info before removal
+declare -a removed_repos=()
+declare -a removed_branches=()
+for sub in "$wt_dir"/*/; do
+  [[ -f "$sub/.git" ]] || continue
+  repo_name=$(basename "$sub")
+  branch=$(git -C "$sub" branch --show-current 2>/dev/null || echo "")
+  removed_repos+=("$repo_name")
+  removed_branches+=("$branch")
+done
+
+# Archive top-level files
+if [[ "$no_archive" == false ]]; then
+  archive_dir="$GROVE_ARCHIVE/$name"
+
+  files_to_archive=()
+  for f in "$wt_dir"/*; do
+    [[ ! -f "$f" ]] && continue
+    fname=$(basename "$f")
+    [[ "$fname" == "CLAUDE.md" || "$fname" == "AGENTS.md" ]] && continue
+    files_to_archive+=("$f")
+  done
+
+  if [[ ${#files_to_archive[@]} -gt 0 ]]; then
+    mkdir -p "$archive_dir"
+    for f in "${files_to_archive[@]}"; do
+      mv "$f" "$archive_dir/"
+      echo "Archived: $(basename "$f")"
+    done
+    echo "Documents archived to: $archive_dir"
+  else
+    echo "No documents to archive."
+  fi
+fi
+
+# Export anonymization draft to personal wlog (~/wlog/cases/)
+# Safety net: file is saved with .draft.md suffix which wlog/.gitignore blocks from push
+if [[ "$export_personal" == true ]]; then
+  if [[ "$no_archive" == true ]]; then
+    echo ""
+    echo "Warning: --export-personal requires archived PLAN.md but --no-archive is set. Skipping export."
+  else
+    plan_file="$GROVE_ARCHIVE/$name/PLAN.md"
+    wlog_root="$(dirname "$GROVE_CASEBOOK")"
+    wlog_cases="$GROVE_CASEBOOK"
+
+    if [[ ! -d "$wlog_root" ]]; then
+      echo ""
+      echo "Warning: $wlog_root not found. Set up personal wlog repo first (see ~/wlog/README.md). Skipping export."
+    elif [[ ! -f "$plan_file" ]]; then
+      echo ""
+      echo "Warning: $plan_file not found. Skipping personal export."
+    else
+      mkdir -p "$wlog_cases"
+
+      # Quarter from current date (YYYY-Q[1-4])
+      year=$(date +%Y)
+      month_num=$((10#$(date +%m)))
+      quarter=$(( (month_num - 1) / 3 + 1 ))
+
+      draft_file="$wlog_cases/${year}-Q${quarter}-${name}.draft.md"
+
+      if [[ -f "$draft_file" ]]; then
+        echo ""
+        echo "Warning: $draft_file already exists. Skipping to avoid overwrite."
+      else
+        {
+          grove_draft_header "$draft_file" "$plan_file"
+          echo ""
+          cat "$plan_file"
+        } > "$draft_file"
+
+        echo ""
+        sayf "📝 Draft created: %s\n" "📝 회고 draft 생성됨: %s\n" "$draft_file"
+        say  "   Next: anonymise it, drop the .draft suffix, then commit" \
+             "   다음: 익명화 → .draft 접미사 떼고 commit"
+      fi
+    fi
+  fi
+fi
+
+# Remove remaining top-level files
+for f in "$wt_dir"/*; do
+  [[ -f "$f" ]] && rm "$f"
+done
+
+# Remove hidden files
+rm -rf "$wt_dir"/.[!.]* 2>/dev/null || true
+
+# Remove git worktrees
+for repo_wt in "$wt_dir"/*/; do
+  [[ ! -d "$repo_wt" ]] && continue
+  repo_name=$(basename "$repo_wt")
+
+  matches=$(grove_find_repo "$repo_name" | head -1)
+
+  if [[ -n "$matches" ]]; then
+    echo "Removing worktree for $repo_name..."
+    git -C "$matches" worktree remove "$wt_dir/$repo_name" --force 2>/dev/null || true
+  fi
+done
+
+# Safe removal
+if rmdir "$wt_dir" 2>/dev/null; then
+  echo "Cleaned up: $wt_dir"
+else
+  echo "Warning: $wt_dir is not empty, some contents remain:"
+  ls -la "$wt_dir" 2>/dev/null || true
+  echo "Use 'rm -rf $wt_dir' to force removal."
+fi
+
+# Try to delete merged local branches
+if [[ "$keep_branches" == false ]]; then
+  echo ""
+  echo "=== Cleaning merged local branches ==="
+  for i in "${!removed_repos[@]}"; do
+    repo_name="${removed_repos[$i]}"
+    branch="${removed_branches[$i]}"
+    [[ -z "$branch" ]] && continue
+
+    repo_path=$(grove_find_repo "$repo_name" | head -1)
+    [[ -z "$repo_path" ]] && continue
+
+    # -d only deletes if merged into upstream; squash-merges won't auto-delete
+    if git -C "$repo_path" branch -d "$branch" 2>/dev/null; then
+      echo "  $repo_name: deleted $branch"
+    else
+      echo "  $repo_name: $branch not deleted (unmerged or squash-merged) — use -D manually if needed"
+    fi
+  done
+fi

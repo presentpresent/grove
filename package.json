@@ -1,0 +1,32 @@
+{
+  "name": "@presentpresent/grove",
+  "version": "0.1.1",
+  "description": "Multi-repo git worktree orchestrator — plant several repos in one workspace and give each its own AI session. English and Korean.",
+  "bin": {
+    "grove": "grove"
+  },
+  "files": [
+    "grove",
+    "lib/",
+    "templates/",
+    "skills/"
+  ],
+  "keywords": [
+    "git",
+    "worktree",
+    "monorepo",
+    "multi-repo",
+    "cli",
+    "claude-code",
+    "ai-agent"
+  ],
+  "license": "MIT",
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/presentpresent/grove.git"
+  }
+}

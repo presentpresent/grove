@@ -1,0 +1,51 @@
+#!/bin/bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: wt-setup-deps <origin-repo-path> <worktree-repo-path>
+
+Sets up dev dependencies in a fresh worktree by linking from the origin repo:
+  - .husky/_/      (copied)    husky runtime; gitignored so doesn't follow worktrees
+  - node_modules/  (symlinked) shared with origin, no disk/network cost
+
+Checks both repo root and src/ subdirectory. Skips silently if origin doesn't
+have the artifacts (e.g. repo not yet `npm install`-ed). No-op when worktree
+already has them.
+
+Note: if you need to change dependencies in the worktree, remove the symlink
+first and run a real `npm install` to avoid mutating origin's node_modules.
+EOF
+  exit 1
+}
+
+[[ $# -eq 2 ]] || usage
+
+origin="$1"
+worktree="$2"
+
+[[ -d "$origin" ]] || { echo "wt-setup-deps: origin not found: $origin" >&2; exit 1; }
+[[ -d "$worktree" ]] || { echo "wt-setup-deps: worktree not found: $worktree" >&2; exit 1; }
+
+origin="$(cd "$origin" && pwd)"
+
+LOCATIONS=("." "src")
+
+for loc in "${LOCATIONS[@]}"; do
+  origin_dir="$origin/$loc"
+  worktree_dir="$worktree/$loc"
+  [[ -d "$origin_dir" ]] || continue
+  [[ -d "$worktree_dir" ]] || continue
+
+  if [[ -d "$origin_dir/.husky" && -d "$worktree_dir/.husky" ]]; then
+    if [[ -d "$origin_dir/.husky/_" && ! -e "$worktree_dir/.husky/_" ]]; then
+      cp -R "$origin_dir/.husky/_" "$worktree_dir/.husky/_"
+      echo "  copied $loc/.husky/_"
+    fi
+  fi
+
+  if [[ -d "$origin_dir/node_modules" && ! -e "$worktree_dir/node_modules" ]]; then
+    ln -s "$origin_dir/node_modules" "$worktree_dir/node_modules"
+    echo "  symlinked $loc/node_modules -> $origin_dir/node_modules"
+  fi
+done

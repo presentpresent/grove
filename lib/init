@@ -1,0 +1,515 @@
+#!/bin/bash
+# grove init — 지금 이 머신의 상태를 보고 grove 설정을 만들어줌
+#
+# 원칙 셋:
+#   1) 감지 → 제안 → 확인. 사용자가 고른 것만 기록함
+#   2) 파일을 옮기지 않는 게 기본. "레포를 한 곳에 모으라"는 요구가 진입장벽임
+#   3) 마지막에 쓸 내용을 통째로 보여주고 한 번 더 물음
+#
+# 결과물은 ~/.config/grove/config 하나. 나머지는 선택
+
+. "$(cd "$(dirname "$0")" && pwd)/config"
+set -uo pipefail
+
+GROVE_HOME="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG_FILE="$HOME/.config/grove/config"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+DRY_RUN=0
+ASSUME_YES=0
+SCAN_DEPTH=4
+
+usage() {
+  if grove_is_ko; then
+  cat <<EOF
+사용법: grove init [--dry-run] [--yes] [--depth <n>]
+
+이 머신의 레포 배치·브랜치 관행·화면 도구를 살펴보고 $CONFIG_FILE 을 만듦
+
+옵션:
+  --dry-run     쓰지 않고 만들어질 내용만 보여줌
+  --yes         묻지 않고 감지된 기본값으로 진행
+  --depth <n>   홈 아래 몇 단계까지 레포를 찾을지 (기본 $SCAN_DEPTH)
+EOF
+  else
+  cat <<EOF
+Usage: grove init [--dry-run] [--yes] [--depth <n>]
+
+Looks at how repos are laid out on this machine, what your branch names look
+like, and which screen tool is installed, then writes $CONFIG_FILE
+
+Options:
+  --dry-run     show what would be written, write nothing
+  --yes         don't ask, accept the detected defaults
+  --depth <n>   how many levels under home to search (default $SCAN_DEPTH)
+EOF
+  fi
+  exit 1
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --yes|-y)  ASSUME_YES=1; shift ;;
+    --depth)   SCAN_DEPTH="$2"; shift 2 ;;
+    -h|--help) usage ;;
+    *) sayf "Unknown option: %s\n" "모르는 옵션: %s\n" "$1" >&2; usage ;;
+  esac
+done
+
+# 터미널이 아닌데 --yes 도 없으면 아무것도 쓰지 않음. 파이프로 돌렸다가
+# 설정이 덮어써지는 사고를 막음
+if [ ! -t 0 ] && [ "$ASSUME_YES" = 0 ]; then
+  say "ℹ️  Not a terminal, so nothing can be asked → running as --dry-run" "ℹ️  터미널이 아니라 물어볼 수가 없음 → --dry-run 으로 진행함"
+  say "   To write anyway: grove init --yes" "   그대로 쓰려면: grove init --yes"
+  echo
+  DRY_RUN=1
+  ASSUME_YES=1
+fi
+
+# ── 묻기 ──────────────────────────────────────────────────────────
+
+ANSWER=""
+
+ask() { # ask <질문> <기본값>
+  local q="$1" def="${2:-}" ans=""
+  if [ "$ASSUME_YES" = 1 ]; then ANSWER="$def"; return 0; fi
+  if [ -n "$def" ]; then printf '  %s [%s]: ' "$q" "$def"
+  else printf '  %s: ' "$q"; fi
+  IFS= read -r ans || ans=""
+  ANSWER="${ans:-$def}"
+}
+
+confirm() { # confirm <질문> <y|n 기본>
+  local q="$1" def="${2:-n}" ans=""
+  if [ "$ASSUME_YES" = 1 ]; then [ "$def" = y ]; return $?; fi
+  local hint="y/N"; [ "$def" = y ] && hint="Y/n"
+  printf '  %s [%s]: ' "$q" "$hint"
+  IFS= read -r ans || ans=""
+  ans="${ans:-$def}"
+  case "$ans" in [Yy]*) return 0 ;; *) return 1 ;; esac
+}
+
+choose() { # choose <기본번호> <항목…>  → ANSWER 에 번호
+  local def="$1"; shift
+  local i=1 item ans=""
+  for item in "$@"; do
+    printf '    %d) %s\n' "$i" "$item"
+    i=$((i + 1))
+  done
+  if [ "$ASSUME_YES" = 1 ]; then ANSWER="$def"; return 0; fi
+  sayf '  number [%s]: ' '  번호 [%s]: ' "$def"
+  IFS= read -r ans || ans=""
+  ans="${ans:-$def}"
+  case "$ans" in
+    ''|*[!0-9]*) ANSWER="$def" ;;
+    *) if [ "$ans" -ge 1 ] && [ "$ans" -lt $(($# + 1)) ]; then ANSWER="$ans"; else ANSWER="$def"; fi ;;
+  esac
+}
+
+section() { echo; echo "── $1 ──"; }
+
+# ── 1. 레포 스캔 ──────────────────────────────────────────────────
+
+section "$(sayf "Looking for repos (%s levels under home)" "레포 찾는 중 (홈 아래 %s단계)" "$SCAN_DEPTH")"
+
+# 점으로 시작하는 디렉토리는 통째로 건너뜀 (.git 만 예외). 툴 설정 디렉토리가
+# 자기 레포인 경우가 많은데(.warp·.oh-my-zsh 류) 그게 브랜치 관행 추론을 오염시킴
+find "$HOME" -maxdepth "$SCAN_DEPTH" \
+  \( \( -name '.?*' ! -name .git \) -o -name Library -o -name node_modules \
+     -o -name Applications -o -name Pictures -o -name Music -o -name Movies \
+     -o -name vendor -o -name venv \) -prune \
+  -o -type d -name .git -print 2>/dev/null \
+  | while IFS= read -r g; do dirname "$g"; done > "$TMP/repos"
+
+repo_count=$(wc -l < "$TMP/repos" | tr -d ' ')
+
+if [ "$repo_count" -eq 0 ]; then
+  say "No repos found. Try a bigger --depth, or run this where your repos live." "레포를 못 찾았음. --depth 를 늘려보거나 레포가 있는 곳에서 다시 실행할 것"
+  exit 1
+fi
+
+# 부모 디렉토리별로 묶음: "개수<TAB>경로"
+while IFS= read -r r; do dirname "$r"; done < "$TMP/repos" \
+  | sort | uniq -c | sort -rn \
+  | sed 's/^ *\([0-9][0-9]*\) /\1\t/' > "$TMP/groups"
+
+group_count=$(wc -l < "$TMP/groups" | tr -d ' ')
+sayf "%s repos across %s locations\n" "레포 %s개, 위치 %s곳\n" "$repo_count" "$group_count"
+echo
+if grove_is_ko; then
+  awk -F'\t' '{ printf "    %4d개  %s\n", $1, $2 }' "$TMP/groups" | head -12
+else
+  awk -F'\t' '{ printf "    %4d  %s\n", $1, $2 }' "$TMP/groups" | head -12
+fi
+[ "$group_count" -gt 12 ] && sayf "    … and %s more\n" "    … 그 외 %s곳\n" "$((group_count - 12))"
+
+# 모노레포 하나뿐이면 grove 가 할 일이 없음
+if [ "$repo_count" -eq 1 ]; then
+  echo
+  say "Only one repo here. grove is for pulling several repos into one task," "레포가 하나뿐임. grove 는 여러 레포를 한 작업에 모을 때 쓰는 물건이라"
+  say "so plain git worktree add is simpler for you right now." "지금은 git worktree add 를 직접 쓰는 편이 간단함"
+  echo
+  confirm "$(say "Set it up anyway?" "그래도 설정할까?")" n || exit 0
+fi
+
+# ── 2. 레포 배치 ──────────────────────────────────────────────────
+
+collect_mode=1
+sel_groups=""
+
+if [ "$group_count" -gt 1 ]; then
+  section "$(say "Where your repos live" "레포 위치")"
+  say "  Your repos are spread across several places. grove can watch all of them as-is." "  레포가 여러 곳에 흩어져 있음. grove 는 여러 경로를 그대로 볼 수 있음"
+  echo
+  choose 1 \
+    "$(say "Leave them — register every path in GROVE_REPOS (recommended)" "그대로 둠 — 모든 경로를 GROVE_REPOS 에 등록 (권장)")" \
+    "$(say "Gather symlinks in one place — originals untouched" "한 곳에 symlink 로 모음 — 원본은 그대로, 링크만 만듦")" \
+    "$(say "Pick only the paths you want" "쓸 경로만 직접 고름")"
+  collect_mode="$ANSWER"
+else
+  sel_groups="$(cut -f2 "$TMP/groups")"
+fi
+
+case "$collect_mode" in
+  1) sel_groups="$(cut -f2 "$TMP/groups")" ;;
+  2) sel_groups="$(cut -f2 "$TMP/groups")" ;;
+  3)
+    echo
+    say "  Enter the numbers you want, space separated (e.g. 1 3)" "  쓸 경로의 번호를 공백으로 구분해 입력 (예: 1 3)"
+    i=1
+    while IFS=$'\t' read -r c p; do sayf '    %d) %4d  %s\n' '    %d) %4d개  %s\n' "$i" "$c" "$p"; i=$((i + 1)); done < "$TMP/groups"
+    ask "$(say "numbers" "번호")" "1"
+    picked=""
+    for n in $ANSWER; do
+      case "$n" in ''|*[!0-9]*) continue ;; esac
+      line=$(sed -n "${n}p" "$TMP/groups" | cut -f2)
+      [ -n "$line" ] && picked="$picked$line
+"
+    done
+    sel_groups="$(printf '%s' "$picked" | sed '/^$/d')"
+    [ -n "$sel_groups" ] || sel_groups="$(cut -f2 "$TMP/groups" | head -1)"
+    ;;
+esac
+
+# 고른 경로에 속한 레포만 추림. 부모 경로가 정확히 일치할 때만 (문자열 포함이면
+# ~/dev 가 ~/dev2 까지 끌고 옴)
+printf '%s\n' "$sel_groups" > "$TMP/sel_groups"
+awk 'NR==FNR { g[$0]=1; next }
+     { p = $0; sub(/\/[^\/]*$/, "", p); if (p in g) print }' \
+    "$TMP/sel_groups" "$TMP/repos" > "$TMP/sel_repos"
+sel_count=$(wc -l < "$TMP/sel_repos" | tr -d ' ')
+
+# ── 3. 워크스페이스 루트 ──────────────────────────────────────────
+
+section "$(say "Where worktrees go" "워크트리를 둘 곳")"
+
+# 고른 경로가 하나면 그 부모를, 여럿이면 홈 아래 grove/ 를 기본으로
+first_group="$(printf '%s\n' "$sel_groups" | head -1)"
+if [ "$(printf '%s\n' "$sel_groups" | wc -l | tr -d ' ')" = "1" ]; then
+  default_root="$(dirname "$first_group")"
+else
+  default_root="$HOME/grove"
+fi
+
+say "  Per-task worktrees and the archive of finished work end up here." "  작업별 워크트리와 끝난 작업 아카이브가 여기 들어감"
+ask "$(say "workspace root" "워크스페이스 루트")" "$default_root"
+root="$ANSWER"
+
+link_dir=""
+if [ "$collect_mode" = 2 ]; then
+  ask "$(say "directory to gather symlinks in" "symlink 를 모을 디렉토리")" "$root/repos"
+  link_dir="$ANSWER"
+fi
+
+# ── 4. 브랜치 규칙 ────────────────────────────────────────────────
+
+section "$(say "Branch naming" "브랜치 이름 규칙")"
+
+# 최근 원격 브랜치 이름을 훑어 prefix 와 티켓 접두사를 셈
+: > "$TMP/prefixes"; : > "$TMP/tickets"; : > "$TMP/branches"; : > "$TMP/rests"
+n=0
+while IFS= read -r repo; do
+  n=$((n + 1)); [ "$n" -gt 15 ] && break
+  git -C "$repo" for-each-ref --format='%(refname:short)' \
+      --sort=-committerdate --count=40 refs/remotes/origin 2>/dev/null
+done < "$TMP/sel_repos" | sed 's|^origin/||' >> "$TMP/branches"
+
+while IFS= read -r br; do
+  case "$br" in
+    ''|HEAD|master|main|develop|dev|release|staging|prod|production) continue ;;
+  esac
+  rest="$br"
+  case "$br" in
+    */*) printf '%s\n' "${br%%/*}" >> "$TMP/prefixes"; rest="${br#*/}" ;;
+  esac
+  printf '%s\n' "$rest" >> "$TMP/rests"
+  # 개행을 꼭 붙일 것. printf '%s' 로 하면 토큰이 전부 한 줄에 이어붙어 집계가 0 이 됨
+  printf '%s\n' "$rest" | sed -n 's/^\([A-Z][A-Z0-9]\{1,\}\)-.*/\1/p' >> "$TMP/tickets"
+done < "$TMP/branches"
+
+top_prefix=""
+if [ -s "$TMP/prefixes" ]; then
+  top_prefix=$(sort "$TMP/prefixes" | uniq -c | sort -rn | head -1 | awk '{print $2}')
+fi
+top_ticket=""
+ticket_share=0
+if [ -s "$TMP/tickets" ]; then
+  top_ticket=$(sort "$TMP/tickets" | uniq -c | sort -rn | head -1 | awk '{print $2}')
+  tk_top=$(sort "$TMP/tickets" | uniq -c | sort -rn | head -1 | awk '{print $1}')
+  # 분모는 main·develop 을 걸러낸 "실제 작업 브랜치" 수. 전체 브랜치로 나누면 희석됨
+  tk_all=$(wc -l < "$TMP/rests" | tr -d ' ')
+  [ "$tk_all" -gt 0 ] && ticket_share=$((tk_top * 100 / tk_all))
+fi
+
+# prefix 어휘 중 "작업 종류"로 보이는 것만 추림
+KNOWN_TYPES="feature feat fix hotfix bugfix chore docs doc refactor test infra perf ci build style"
+detected_types=""
+if [ -s "$TMP/prefixes" ]; then
+  while IFS= read -r p; do
+    for k in $KNOWN_TYPES; do
+      [ "$p" = "$k" ] && detected_types="$detected_types $p" && break
+    done
+  done < <(sort "$TMP/prefixes" | uniq -c | sort -rn | awk '{print $2}')
+fi
+detected_types="$(printf '%s' "$detected_types" | sed 's/^ *//')"
+
+# 추론한 템플릿
+inferred=""
+if [ -n "$detected_types" ]; then
+  if [ -n "$top_ticket" ] && [ "$ticket_share" -ge 40 ]; then
+    inferred="{type}/${top_ticket}-{name}"
+  else
+    inferred="{type}/{name}"
+  fi
+elif [ -n "$top_prefix" ]; then
+  inferred="${top_prefix}/{name}"
+else
+  inferred="{name}"
+fi
+
+branch_count=$(wc -l < "$TMP/branches" | tr -d ' ')
+sayf "  Read %s recent remote branches\n" "  최근 원격 브랜치 %s개를 봤음\n" "$branch_count"
+[ -n "$top_prefix" ]     && sayf "    most common prefix: %s\n" "    가장 흔한 prefix: %s\n" "$top_prefix"
+[ -n "$detected_types" ] && sayf "    words that look like work types: %s\n" "    작업 종류로 보이는 어휘: %s\n" "$detected_types"
+[ -n "$top_ticket" ]     && sayf "    ticket key: %s- (%s%% of branches)\n" "    티켓 접두사: %s- (전체의 %s%%)\n" "$top_ticket" "$ticket_share"
+echo
+
+say "  ⚠️  GitHub organization rules can enforce branch names, but those rules" "  ⚠️  GitHub org 룰로 브랜치 이름이 강제되는 경우가 있는데, 그 규칙은"
+say "     are invisible via the API without admin:org. Your history is the better signal." "     admin:org 권한 없이는 API 로 안 보임. 이력 추론이 더 정확함"
+echo
+
+choose 1 \
+  "$(sayf "inferred from your history — %s" "이력에서 추론한 것 — %s" "$inferred")" \
+  "$(say "common convention — {type}/{name}" "일반적인 모범 사례 — {type}/{name}")" \
+  "$(say "type it myself" "직접 입력")"
+case "$ANSWER" in
+  1) branch_tpl="$inferred" ;;
+  2) branch_tpl='{type}/{name}' ;;
+  3) ask "$(say "branch template ({type} and {name} get substituted)" "브랜치 템플릿 ({type}·{name} 이 치환됨)")" "$inferred"; branch_tpl="$ANSWER" ;;
+esac
+
+# 종류 목록·기본값을 감지한 어휘에 맞춤 (feat 쓰는 팀에 feature 를 강요하지 않음)
+DEFAULT_TYPES="feature,hotfix,fix,chore,docs,refactor,test,infra"
+if [ -n "$detected_types" ]; then
+  types_csv="$(printf '%s' "$detected_types" | tr ' ' ',')"
+  for t in $(printf '%s' "$DEFAULT_TYPES" | tr ',' ' '); do
+    case ",$types_csv," in *",$t,"*) ;; *) types_csv="$types_csv,$t" ;; esac
+  done
+  type_default="$(printf '%s' "$detected_types" | awk '{print $1}')"
+else
+  types_csv="$DEFAULT_TYPES"
+  type_default="feature"
+fi
+
+# 템플릿에 {type} 이 없으면 종류 축은 의미가 없음
+case "$branch_tpl" in
+  *'{type}'*) ;;
+  *) types_csv="$DEFAULT_TYPES"; type_default="feature" ;;
+esac
+
+# ── 5. 화면 도구 ──────────────────────────────────────────────────
+
+section "$(say "Screen tool" "화면 도구")"
+mux=""
+for m in herdr tmux zellij; do
+  if command -v "$m" >/dev/null 2>&1; then mux="$m"; break; fi
+done
+if [ -n "$mux" ]; then
+  sayf "  found %s → grove open will use it\n" "  %s 감지됨 → grove open 이 이걸 씀\n" "$mux"
+else
+  say "  none found. grove open will just print guidance (other commands still work)" "  못 찾았음. grove open 은 안내만 하고 끝남 (나머지 명령은 그대로 동작)"
+  say "  With herdr it also starts one AI session per repo." "  herdr 를 쓰면 레포별 AI 세션까지 자동으로 붙음"
+fi
+
+# ── 6. casebook ───────────────────────────────────────────────────
+
+section "$(say "Retrospectives (optional)" "회고 기록 (선택)")"
+say "  grove rm turns a finished task's PLAN.md into a retrospective draft." "  grove rm 이 끝난 작업의 PLAN.md 를 회고 draft 로 뽑아둠"
+casebook=""
+if confirm "$(say "Use it?" "쓸까?")" n; then
+  ask "$(say "directory for the records" "기록 디렉토리")" "$HOME/casebook/cases"
+  casebook="$ANSWER"
+else
+  say "  skipped (fill in GROVE_CASEBOOK later to enable it)" "  건너뜀 (나중에 GROVE_CASEBOOK 만 채우면 켜짐)"
+fi
+
+# ── 7. 스킬 ───────────────────────────────────────────────────────
+
+section "$(say "AI skills (optional)" "AI 스킬 (선택)")"
+install_skills=0
+skill_targets=""
+if [ -d "$GROVE_HOME/skills" ]; then
+  say "  /grove-start · /grove-resume — let the AI drive starting and resuming work" "  /grove-start · /grove-resume — 작업 착수와 복귀를 AI 가 진행해줌"
+  grove_is_ko || echo "  (these two are written in Korean — the AI reads them fine, but you may not want them)"
+  [ -d "$HOME/.claude" ] && skill_targets="$HOME/.claude/skills"
+  if [ -n "$skill_targets" ]; then
+    if confirm "$(sayf "Install into %s?" "%s 에 설치할까?" "$skill_targets")" y; then install_skills=1; fi
+  else
+    say "  no ~/.claude, skipping" "  ~/.claude 가 없어 건너뜀"
+  fi
+else
+  say "  this install has no skills bundled (skipping)" "  이 설치본에 스킬이 없음 (건너뜀)"
+fi
+
+# ── 8. 요약 ───────────────────────────────────────────────────────
+
+repos_csv="$(printf '%s\n' "$sel_groups" | paste -sd ':' -)"
+[ "$collect_mode" = 2 ] && repos_csv="$link_dir"
+
+if grove_is_ko; then lang_val=ko; else lang_val=en; fi
+
+if grove_is_ko; then
+conf_body=$(cat <<EOF
+# grove 설정 — grove init 이 만듦
+#
+# 각 줄은 "환경변수가 없을 때만 적용" 형태임. 그래서 한 번만 다르게 쓰고 싶으면
+#   GROVE_REPOS=~/other grove ls
+# 처럼 앞에 붙이면 이 파일보다 우선함
+
+# ── 경로 ──
+[ -n "\${GROVE_ROOT:-}" ]    || GROVE_ROOT="$root"
+[ -n "\${GROVE_TREES:-}" ]   || GROVE_TREES="\$GROVE_ROOT/worktrees"
+[ -n "\${GROVE_ARCHIVE:-}" ] || GROVE_ARCHIVE="\$GROVE_ROOT/archive"
+
+# 레포 원본. 콜론으로 여러 곳을 볼 수 있음
+[ -n "\${GROVE_REPOS:-}" ]   || GROVE_REPOS="$repos_csv"
+
+# ── 브랜치 이름 ──
+# {type} 은 --type, {name} 은 작업명으로 치환됨
+[ -n "\${GROVE_BRANCH:-}" ]  || GROVE_BRANCH='$branch_tpl'
+[ -n "\${GROVE_TYPE:-}" ]    || GROVE_TYPE=$type_default
+[ -n "\${GROVE_TYPES:-}" ]   || GROVE_TYPES=$types_csv
+
+# ── 선택 ──
+# LANG 이 비어 있는 환경이 흔해서 언어를 명시해 둠
+[ -n "\${GROVE_LANG:-}" ]     || GROVE_LANG=$lang_val
+[ -n "\${GROVE_CASEBOOK:-}" ] || GROVE_CASEBOOK="$casebook"
+[ -n "\${GROVE_MUX:-}" ]      || GROVE_MUX="$mux"
+EOF
+)
+else
+conf_body=$(cat <<EOF
+# grove config — written by grove init
+#
+# Every line applies only when the environment variable is unset, so a one-off
+# override is just a prefix:
+#   GROVE_REPOS=~/other grove ls
+
+# ── paths ──
+[ -n "\${GROVE_ROOT:-}" ]    || GROVE_ROOT="$root"
+[ -n "\${GROVE_TREES:-}" ]   || GROVE_TREES="\$GROVE_ROOT/worktrees"
+[ -n "\${GROVE_ARCHIVE:-}" ] || GROVE_ARCHIVE="\$GROVE_ROOT/archive"
+
+# Where your repos live. Colon-separated for several paths
+[ -n "\${GROVE_REPOS:-}" ]   || GROVE_REPOS="$repos_csv"
+
+# ── branch naming ──
+# {type} comes from --type, {name} from the task name
+[ -n "\${GROVE_BRANCH:-}" ]  || GROVE_BRANCH='$branch_tpl'
+[ -n "\${GROVE_TYPE:-}" ]    || GROVE_TYPE=$type_default
+[ -n "\${GROVE_TYPES:-}" ]   || GROVE_TYPES=$types_csv
+
+# ── optional ──
+# LANG is often unset, so the language is pinned here
+[ -n "\${GROVE_LANG:-}" ]     || GROVE_LANG=$lang_val
+[ -n "\${GROVE_CASEBOOK:-}" ] || GROVE_CASEBOOK="$casebook"
+[ -n "\${GROVE_MUX:-}" ]      || GROVE_MUX="$mux"
+EOF
+)
+fi
+
+section "$(say "About to write" "이렇게 쓸 예정")"
+echo
+printf '%s\n' "$conf_body" | sed 's/^/  /'
+echo
+echo "  → $CONFIG_FILE"
+[ "$collect_mode" = 2 ] && sayf "  → %s symlinks in %s/\n" "  → %s/ 에 레포 %s개 symlink\n" \
+    "$( grove_is_ko && echo "$link_dir" || echo "$sel_count" )" "$( grove_is_ko && echo "$sel_count" || echo "$link_dir" )"
+[ "$install_skills" = 1 ] && echo "  → $skill_targets/grove-{start,resume}"
+[ -n "$casebook" ] && echo "  → $casebook/"
+echo
+sayf "  example branch: %s\n" "  예시 브랜치: %s\n" "$(printf '%s' "$branch_tpl" | sed "s/{type}/$type_default/; s/{name}/checkout-redesign/")"
+
+if [ "$DRY_RUN" = 1 ]; then
+  echo
+  say "🔎 --dry-run, so nothing was written" "🔎 --dry-run 이라 아무것도 쓰지 않았음"
+  exit 0
+fi
+
+echo
+confirm "$(say "Go ahead?" "이대로 진행할까?")" y || { say "Cancelled." "취소함"; exit 0; }
+
+# ── 9. 쓰기 ───────────────────────────────────────────────────────
+
+mkdir -p "$(dirname "$CONFIG_FILE")"
+if [ -f "$CONFIG_FILE" ]; then
+  cp "$CONFIG_FILE" "$CONFIG_FILE.bak"
+  sayf "  previous config kept at %s\n" "  이전 설정 보관: %s\n" "$CONFIG_FILE.bak"
+fi
+printf '%s\n' "$conf_body" > "$CONFIG_FILE"
+echo "  ✅ $CONFIG_FILE"
+
+mkdir -p "$root/worktrees" "$root/archive"
+echo "  ✅ $root/{worktrees,archive}"
+
+if [ "$collect_mode" = 2 ]; then
+  mkdir -p "$link_dir"
+  linked=0; skipped=0
+  while IFS= read -r r; do
+    tgt="$link_dir/$(basename "$r")"
+    if [ -e "$tgt" ] || [ -L "$tgt" ]; then skipped=$((skipped + 1)); continue; fi
+    ln -s "$r" "$tgt" && linked=$((linked + 1))
+  done < "$TMP/sel_repos"
+  sayf "  ✅ %s symlinks created (%s skipped, already there)\n" "  ✅ symlink %s개 생성 (이미 있어서 건너뜀: %s개)\n" "$linked" "$skipped"
+fi
+
+if [ -n "$casebook" ]; then
+  mkdir -p "$casebook"
+  echo "  ✅ $casebook"
+fi
+
+if [ "$install_skills" = 1 ]; then
+  mkdir -p "$skill_targets"
+  for s in "$GROVE_HOME"/skills/*/; do
+    [ -d "$s" ] || continue
+    name="$(basename "$s")"
+    rm -rf "${skill_targets:?}/$name"
+    cp -R "$s" "$skill_targets/$name"
+  done
+  say "  ✅ skills installed (run grove init again to refresh them)" "  ✅ 스킬 설치 (다시 설치하려면 grove init 을 또 돌리면 됨)"
+fi
+
+# ── 10. 다음 단계 ─────────────────────────────────────────────────
+
+echo
+say "Next:" "다음:"
+if ! command -v grove >/dev/null 2>&1; then
+  sayf "  add to PATH:  export PATH=\"%s:\$PATH\"\n" "  PATH 에 추가:  export PATH=\"%s:\$PATH\"\n" "$GROVE_HOME"
+fi
+say "  grove ls                    see current worktrees" "  grove ls                       현재 워크트리 확인"
+say "  grove new <name> <repo>…    start your first task" "  grove new <작업명> <repo>…     첫 작업 만들기"
+[ -n "$mux" ] && say "  grove open <name>           lay out the screen" "  grove open <작업명>            화면 배치"
+echo
+sayf "To change any of this: %s\n" "설정을 고치려면: %s\n" "$CONFIG_FILE"

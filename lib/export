@@ -1,0 +1,99 @@
+#!/bin/bash
+# wt export <name>
+# Generate anonymization draft for a worktree's PLAN.md.
+# Useful when wt rm was run without auto-export, or to refresh a draft.
+#
+# Source priority:
+#   1. ~/Projects/archive/<name>/PLAN.md  (already archived — most common)
+#   2. ~/Projects/worktrees/<name>/PLAN.md (still active)
+#
+# Output: ~/wlog/cases/<YYYY-Q[N]>-<name>.draft.md
+#         (gitignored by wlog until user anonymizes and renames .draft → .md)
+. "$(cd "$(dirname "$0")" && pwd)/config"
+
+set -euo pipefail
+
+WLOG_ROOT="$(dirname "$GROVE_CASEBOOK")"
+WLOG_CASES="$GROVE_CASEBOOK"
+
+usage() {
+  cat <<'EOF'
+Usage: wt export [--force] <name>
+
+Generate anonymization draft in ~/wlog/cases/ from a worktree's PLAN.md.
+
+Source priority:
+  1. ~/Projects/archive/<name>/PLAN.md  (already archived)
+  2. ~/Projects/worktrees/<name>/PLAN.md (still active)
+
+Output: ~/wlog/cases/<YYYY-Q[N]>-<name>.draft.md
+        Gitignored by wlog until user anonymizes and renames .draft → .md.
+
+Options:
+  --force    Overwrite existing draft if present
+EOF
+  exit 1
+}
+
+force=false
+positional=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force) force=true; shift ;;
+    -h|--help) usage ;;
+    -*) usage ;;
+    *) positional+=("$1"); shift ;;
+  esac
+done
+set -- "${positional[@]+"${positional[@]}"}"
+
+[[ $# -ne 1 ]] && usage
+
+name="$1"
+
+# Find PLAN.md (archive preferred, then active worktree)
+plan_file=""
+for candidate in "$GROVE_ARCHIVE/$name/PLAN.md" "$GROVE_TREES/$name/PLAN.md"; do
+  if [[ -f "$candidate" ]]; then
+    plan_file="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$plan_file" ]]; then
+  echo "Error: PLAN.md not found for '$name'"
+  echo "  Looked in:"
+  echo "    $GROVE_ARCHIVE/$name/PLAN.md"
+  echo "    $GROVE_TREES/$name/PLAN.md"
+  exit 1
+fi
+
+# Verify wlog repo present
+if [[ ! -d "$WLOG_ROOT" ]]; then
+  echo "Error: $WLOG_ROOT not found. Set up personal wlog repo first (see ~/wlog/README.md)."
+  exit 1
+fi
+
+mkdir -p "$WLOG_CASES"
+
+# Quarter from current date (YYYY-Q[1-4])
+year=$(date +%Y)
+month_num=$((10#$(date +%m)))
+quarter=$(( (month_num - 1) / 3 + 1 ))
+
+draft_file="$WLOG_CASES/${year}-Q${quarter}-${name}.draft.md"
+
+if [[ -f "$draft_file" && "$force" == false ]]; then
+  sayf "Error: %s already exists. Use --force to overwrite.\n" "오류: %s 가 이미 있음. 덮어쓰려면 --force\n" "$draft_file" >&2
+  exit 1
+fi
+
+{
+  grove_draft_header "$draft_file" "$plan_file"
+  echo ""
+  cat "$plan_file"
+} > "$draft_file"
+
+sayf "📝 Draft created: %s\n" "📝 회고 draft 생성됨: %s\n" "$draft_file"
+say  "   Next: anonymise it, drop the .draft suffix, then commit" \
+     "   다음: 익명화 → .draft 접미사 떼고 commit"

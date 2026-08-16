@@ -1,0 +1,67 @@
+#!/bin/bash
+. "$(cd "$(dirname "$0")" && pwd)/config"
+set -euo pipefail
+
+usage() {
+  if grove_is_ko; then
+  cat <<EOF
+사용법: grove ls [--all]
+
+GROVE_REPOS 아래 모든 레포의 활성 워크트리를 훑음:
+$(grove_repo_paths | sed 's/^/  /')
+
+옵션:
+  --all   레포 원본 경로도 같이 보여줌 (기본은 워크트리만)
+EOF
+  else
+  cat <<EOF
+Usage: grove ls [--all]
+
+Scans every repo under GROVE_REPOS for active worktrees:
+$(grove_repo_paths | sed 's/^/  /')
+
+Options:
+  --all   also show the origin repo path (default: worktrees only)
+EOF
+  fi
+  exit 1
+}
+
+show_all=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --all) show_all=true; shift ;;
+    -h|--help) usage ;;
+    *) usage ;;
+  esac
+done
+
+found=0
+# 같은 레포를 symlink 로도 잡고 원본으로도 잡으면 두 번 나옴. 실경로로 걸러냄
+# (bash 3.2 라 연관 배열을 못 씀 → 문자열에 쌓음)
+seen="|"
+while IFS= read -r repo; do
+  [[ -d "$repo/.git" ]] || [[ -f "$repo/.git" ]] || continue
+  repo_name=$(basename "$repo")
+  repo_real=$(cd "$repo" && pwd -P)
+  case "$seen" in *"|$repo_real|"*) continue ;; esac
+  seen="$seen$repo_real|"
+
+  if [[ "$show_all" == true ]]; then
+    output=$(git -C "$repo" worktree list 2>/dev/null)
+  else
+    output=$(git -C "$repo" worktree list 2>/dev/null | grep -vF "$repo_real" || true)
+  fi
+
+  if [[ -n "$output" ]]; then
+    echo "[$repo_name]"
+    echo "$output" | sed 's/^/  /'
+    echo ""
+    found=$((found + 1))
+  fi
+# 프로세스 치환이라 found 가 서브셸에 갇히지 않음 (파이프로 넘기면 0 이 됨)
+done < <(grove_find_repo '*')
+
+if [[ "$found" -eq 0 ]]; then
+  say "No active worktrees." "활성 워크트리가 없음"
+fi

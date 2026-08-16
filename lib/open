@@ -1,0 +1,266 @@
+#!/bin/bash
+# grove open — 워크트리 하나를 화면 워크스페이스로 열고 레포별 페인을 깖
+# 사용법 문구는 usage() 안에 영·한으로 같이 둠
+
+. "$(cd "$(dirname "$0")" && pwd)/config"
+
+set -euo pipefail
+
+usage() {
+  if grove_is_ko; then
+    cat <<'EOF'
+사용법: grove open <작업명> [--phase plan|exec] [--agent claude|codex] [--no-plan] [--no-focus]
+
+  --phase plan (기본)  페인만 깖. 에이전트는 안 띄움
+  --exec               레포별 세션 기동 + 세션 이름 지정 + PLAN.md 계약 프롬프트 주입
+
+레이아웃 (레포 3개, PLAN.md 있음)
+  ┌─────────────────┬──────────────────────┐
+  │  PLAN.md        │ repo1                │
+  │  (자동 재렌더)   ├──────────────────────┤
+  ├─────────────────┤ repo2                │
+  │  셸             ├──────────────────────┤
+  │                 │ repo3                │
+  └─────────────────┴──────────────────────┘
+
+exec 단계에서 각 세션은 `<작업명>-<레포명>` 이름을 가짐. 계획 세션에서
+"checkout-redesign-api-server 에게 …" 처럼 지목해 메시지를 보낼 수 있음
+
+같은 이름의 워크스페이스가 이미 있으면 새로 만들지 않고 활성화만 함
+EOF
+  else
+    cat <<'EOF'
+Usage: grove open <name> [--phase plan|exec] [--agent claude|codex] [--no-plan] [--no-focus]
+
+  --phase plan (default)  lay out panes only, start no agents
+  --exec                  start one session per repo, name them, and inject the PLAN.md contract
+
+Layout (3 repos, PLAN.md present)
+  ┌─────────────────┬──────────────────────┐
+  │  PLAN.md        │ repo1                │
+  │  (auto-render)  ├──────────────────────┤
+  ├─────────────────┤ repo2                │
+  │  shell          ├──────────────────────┤
+  │                 │ repo3                │
+  └─────────────────┴──────────────────────┘
+
+In the exec phase each session is named `<name>-<repo>`, so the planning session
+can address them: "tell checkout-redesign-api-server that …"
+
+If a workspace with the same name exists it is activated rather than recreated
+EOF
+  fi
+}
+
+WT_ROOT="$GROVE_TREES"
+AGENT="claude"
+PHASE="plan"
+FOCUS="--focus"
+NAME=""
+PLAN=1
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --phase) PHASE="$2"; shift 2 ;;
+        --agent) AGENT="$2"; shift 2 ;;
+        --no-plan) PLAN=0; shift ;;
+        --no-focus) FOCUS="--no-focus"; shift ;;
+        -h|--help) usage; exit 0 ;;
+        -*) sayf "Unknown option: %s\n" "모르는 옵션: %s\n" "$1" >&2; exit 1 ;;
+        *) NAME="$1"; shift ;;
+    esac
+done
+
+[ -n "$NAME" ] || { say "Usage: grove open <name> [--phase plan|exec] [--agent claude|codex]" \
+                        "사용법: grove open <작업명> [--phase plan|exec] [--agent claude|codex]" >&2; exit 1; }
+case "$PHASE" in plan|exec) ;; *) say "❌ --phase must be plan or exec" "❌ --phase 는 plan 또는 exec" >&2; exit 1 ;; esac
+
+WT="$WT_ROOT/$NAME"
+[ -d "$WT" ] || { sayf "❌ No such worktree: %s\n" "❌ 워크트리 없음: %s\n" "$WT" >&2
+                  sayf "   available: %s\n" "   목록: %s\n" "$(ls "$WT_ROOT" | tr '\n' ' ')" >&2; exit 1; }
+
+command -v herdr >/dev/null || { say "❌ herdr is not installed" "❌ herdr 미설치" >&2; exit 1; }
+
+# 레포 담당 세션에 주입할 계약 프롬프트
+contract_prompt() {
+    local repo="$1"
+    if grove_is_ko; then
+    cat <<EOF
+이 워크트리는 '$NAME' 작업이고, 너는 \`$repo\` 레포만 담당한다.
+
+1. 먼저 워크트리 루트의 PLAN.md 를 읽어라 (../PLAN.md). 그게 레포 간 합의된 계약이다.
+2. PLAN.md 중 \`$repo\` 에 해당하는 부분만 구현한다. 다른 레포 디렉토리는 읽기만 하고 절대 수정하지 않는다.
+3. 계약(인터페이스·스키마·필드명)을 바꿔야 한다고 판단되면 임의로 바꾸지 말고 멈춘 뒤 보고한다 — 다른 레포가 같은 계약을 보고 있다.
+4. 구현 후에는 스스로 검증할 수단(테스트·빌드·타입체크)을 찾아서 돌리고 결과를 보고한다.
+
+지금은 PLAN.md 를 읽고 \`$repo\` 담당 범위를 요약해서 알려줘. 구현은 그 다음에 시작한다.
+EOF
+    else
+    cat <<EOF
+This worktree is the '$NAME' task, and you own the \`$repo\` repo only.
+
+1. Read PLAN.md at the worktree root first (../PLAN.md). That is the agreed contract between repos.
+2. Implement only the part of PLAN.md that belongs to \`$repo\`. Other repo directories are read-only — never edit them.
+3. If you think the contract (interface, schema, field names) has to change, do not change it. Stop and report — other repos are working against the same contract.
+4. After implementing, find a way to verify yourself (tests, build, typecheck), run it, and report the result.
+
+For now, read PLAN.md and summarise the scope that falls to \`$repo\`. Implementation starts after that.
+EOF
+    fi
+}
+
+# 이미 같은 label 의 워크스페이스가 있으면 재사용
+existing=$(herdr workspace list | python3 -c "
+import sys, json
+label = sys.argv[1]
+for w in json.load(sys.stdin)['result']['workspaces']:
+    if w.get('label') == label:
+        print(w['workspace_id']); break
+" "$NAME")
+
+# 레포 = .git 을 가진 1단계 하위 디렉토리
+repos=()
+for d in "$WT"/*/; do
+    [ -e "${d}.git" ] && repos+=("$(basename "$d")")
+done
+[ ${#repos[@]} -gt 0 ] || { sayf "❌ No git repos inside %s\n" "❌ %s 안에 git 레포가 없음\n" "$WT" >&2; exit 1; }
+
+# ── 이미 열려 있으면: 페인 없는 레포만 골라 추가 (작업 도중 wt add 한 경우) ──
+if [ -n "$existing" ]; then
+    covered=$(herdr pane list | python3 -c "
+import sys, json, os
+ws = sys.argv[1]
+for p in json.load(sys.stdin)['result']['panes']:
+    if p['workspace_id'] == ws:
+        print(os.path.basename(p['cwd']))
+" "$existing")
+
+    missing=()
+    for r in "${repos[@]}"; do
+        grep -qxF "$r" <<<"$covered" || missing+=("$r")
+    done
+
+    herdr workspace focus "$existing" >/dev/null 2>&1 || true
+
+    if [ ${#missing[@]} -eq 0 ]; then
+        sayf "Workspace %s (%s) already up to date — every repo has a pane\n" "워크스페이스 %s (%s) 이미 최신 — 모든 레포에 페인 있음\n" "$NAME" "$existing"
+        exit 0
+    fi
+
+    sayf "Workspace %s (%s): adding %s repo(s): %s\n" "워크스페이스 %s (%s) 에 레포 %s개 추가: %s\n" \
+         "$NAME" "$existing" "${#missing[@]}" "${missing[*]}"
+    # 가장 아래쪽(마지막) 레포 페인을 기준으로 아래로 쪼갬
+    anchor=$(herdr pane list | python3 -c "
+import sys, json, os
+ws = sys.argv[1]; root = sys.argv[2]
+last = None
+for p in json.load(sys.stdin)['result']['panes']:
+    if p['workspace_id'] == ws and p['cwd'] != root:
+        last = p['pane_id']
+print(last or '')
+" "$existing" "$WT")
+    [ -n "$anchor" ] || { say "❌ Could not find an anchor pane" "❌ 기준 페인을 못 찾음" >&2; exit 1; }
+
+    for r in "${missing[@]}"; do
+        anchor=$(herdr pane split --pane "$anchor" --direction down --ratio 0.5 \
+            --cwd "$WT/$r" --no-focus \
+            | python3 -c "import sys,json; x=json.load(sys.stdin)['result']; print((x.get('pane') or x)['pane_id'])")
+        echo "  $anchor  ←  $r"
+        if [ "$PHASE" = "exec" ]; then
+            session="$NAME-$r"
+            if herdr agent start "$session" --kind "$AGENT" --pane "$anchor" \
+                    -- --name "$session" >/dev/null 2>&1; then
+                herdr agent prompt "$session" "$(contract_prompt "$r")" >/dev/null 2>&1 \
+                    && sayf "     ✅ %s started (session: %s)\n" "     ✅ %s 기동 (세션명: %s)\n" "$AGENT" "$session" \
+                    || say  "     ⚠️  started, but the prompt did not go through" "     ⚠️  기동은 됐으나 프롬프트 주입 실패"
+            else
+                sayf "     ⚠️  failed to start — run \`%s\` in that pane yourself\n" "     ⚠️  기동 실패 — 해당 페인에서 직접 \`%s\` 실행\n" "$AGENT"
+            fi
+        fi
+    done
+    exit 0
+fi
+
+sayf "Workspace created: %s  [%s]  (%s repos: %s)\n" "워크스페이스 생성: %s  [%s]  (레포 %s개: %s)\n" "$NAME" "$PHASE" "${#repos[@]}" "${repos[*]}"
+
+root_pane=$(herdr workspace create --cwd "$WT" --label "$NAME" $FOCUS \
+    | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['root_pane']['pane_id'])")
+
+# 오른쪽 절반을 만들고 첫 레포를 앉힘
+n=${#repos[@]}
+pane=$(herdr pane split --pane "$root_pane" --direction right --ratio 0.5 \
+    --cwd "$WT/${repos[0]}" --no-focus \
+    | python3 -c "import sys,json; r=json.load(sys.stdin)['result']; print((r.get('pane') or r)['pane_id'])")
+panes=("$pane")
+
+# 남은 레포는 오른쪽 열을 아래로 균등 분할
+for ((i = 1; i < n; i++)); do
+    remain=$((n - i))
+    ratio=$(python3 -c "print(f'{$remain/($remain+1):.4f}')")
+    pane=$(herdr pane split --pane "$pane" --direction down --ratio "$ratio" \
+        --cwd "$WT/${repos[$i]}" --no-focus \
+        | python3 -c "import sys,json; r=json.load(sys.stdin)['result']; print((r.get('pane') or r)['pane_id'])")
+    panes+=("$pane")
+done
+
+for ((i = 0; i < n; i++)); do
+    echo "  ${panes[$i]}  ←  ${repos[$i]}"
+done
+
+# 왼쪽 열을 위(PLAN.md 자동 재렌더) / 아래(셸) 로 쪼갬
+if [ "$PLAN" = 1 ] && [ -f "$WT/PLAN.md" ]; then
+    shell_pane=$(herdr pane split --pane "$root_pane" --direction down --ratio 0.35 \
+        --cwd "$WT" --no-focus \
+        | python3 -c "import sys,json; r=json.load(sys.stdin)['result']; print((r.get('pane') or r)['pane_id'])")
+    herdr pane run "$root_pane" plan -w >/dev/null   # plan = .zshrc 함수
+    sayf "  %s  ←  PLAN.md (auto re-render) / %s  ←  shell\n" "  %s  ←  PLAN.md (자동 재렌더) / %s  ←  셸\n" "$root_pane" "$shell_pane"
+fi
+
+if [ "$PHASE" = "plan" ]; then
+    # 계획 세션은 repos/ 를 읽을 수 있어야 함 — "이 로직 어느 레포에 있지?" 를 답하고
+    # 필요하면 스스로 wt add 까지 할 수 있게. 실행 세션에는 이 권한을 주지 않음
+    target="${shell_pane:-$root_pane}"
+    add_dirs=()
+    while IFS= read -r d; do add_dirs+=(--add-dir "$d"); done < <(grove_repo_paths)
+    if herdr agent start "$NAME-plan" --kind claude --pane "$target" \
+            -- --name "$NAME-plan" "${add_dirs[@]+"${add_dirs[@]}"}" >/dev/null 2>&1; then
+        echo
+        sayf "  Planning session started: %s-plan  (can read the origin repos)\n" "  계획 세션 기동: %s-plan  (레포 원본 읽기 권한 포함)\n" "$NAME"
+    else
+        echo
+        say "  ⚠️  could not start the planning session — run it yourself:" "  ⚠️  계획 세션 자동 기동 실패 — 직접 실행:"
+        echo "     claude --name $NAME-plan ${add_dirs[*]+"${add_dirs[*]}"}"
+    fi
+    echo
+    say "Planning phase — per-repo agents are not up yet." "계획 단계 — 레포 담당 에이전트는 아직 안 띄웠음"
+    sayf "  Once PLAN.md settles the contract:  grove open %s --exec\n" "  PLAN.md 에 계약을 확정한 뒤:  grove open %s --exec\n" "$NAME"
+    sayf "  To pull in another repo:           grove add %s <repo> && grove open %s\n" "  레포가 더 필요하면:           grove add %s <레포> && grove open %s\n" "$NAME" "$NAME"
+    exit 0
+fi
+
+# ── exec: 레포별 세션 기동 + 이름 지정 + 계약 프롬프트 주입 ──
+[ -f "$WT/PLAN.md" ] || say "  ⚠️  no PLAN.md — entering the exec phase without a contract" "  ⚠️  PLAN.md 가 없음 — 계약 없이 실행 단계로 들어감"
+
+sayf "Starting agents: %s\n" "에이전트 기동: %s\n" "$AGENT"
+for ((i = 0; i < n; i++)); do
+    repo="${repos[$i]}"
+    session="$NAME-$repo"
+
+    # --name 으로 세션 이름을 박아둬야 나중에 다른 세션에서 지목해 메시지를 보낼 수 있음
+    if ! herdr agent start "$session" --kind "$AGENT" --pane "${panes[$i]}" \
+            -- --name "$session" >/dev/null 2>&1; then
+        sayf "  ⚠️  %s failed to start — run \`%s\` in that pane yourself\n" "  ⚠️  %s 기동 실패 — 해당 페인에서 직접 \`%s\` 실행\n" "$repo" "$AGENT"
+        continue
+    fi
+
+    if herdr agent prompt "$session" "$(contract_prompt "$repo")" >/dev/null 2>&1; then
+        sayf "  ✅ %s  (session: %s)\n" "  ✅ %s  (세션명: %s)\n" "$repo" "$session"
+    else
+        sayf "  ⚠️  %s started, but the prompt did not go through — instruct it in that pane\n" "  ⚠️  %s 기동은 됐으나 프롬프트 주입 실패 — 해당 페인에 직접 지시\n" "$repo"
+    fi
+done
+
+echo
+say "Done. Sessions are named \`<name>-<repo>\`, so the planning session can address them:" \
+    "완료. 세션 이름이 \`<작업명>-<레포명>\` 이라, 계획 세션에서 이렇게 지목 가능:"
+sayf "  \"tell %s-%s the PLAN.md contract changed\"\n" "  \"%s-%s 에게 PLAN.md 계약이 바뀌었다고 알려줘\"\n" "$NAME" "${repos[0]}"
