@@ -9,9 +9,10 @@ set -euo pipefail
 usage() {
   if grove_is_ko; then
     cat <<'EOF'
-사용법: grove open <작업명> [--phase plan|exec] [--agent claude|codex] [--no-plan] [--no-focus]
+사용법: grove open <작업명> [--phase plan|exec] [--agent <종류>] [--no-plan] [--no-focus]
 
   --phase plan (기본)  페인만 깖. 에이전트는 안 띄움
+  --agent <종류>       기본 claude. herdr 가 띄울 수 있는 것 아무거나 (codex 등)
   --exec               레포별 세션 기동 + 세션 이름 지정 + PLAN.md 계약 프롬프트 주입
 
 레이아웃 (레포 3개, PLAN.md 있음)
@@ -30,9 +31,10 @@ exec 단계에서 각 세션은 `<작업명>-<레포명>` 이름을 가짐. 계�
 EOF
   else
     cat <<'EOF'
-Usage: grove open <name> [--phase plan|exec] [--agent claude|codex] [--no-plan] [--no-focus]
+Usage: grove open <name> [--phase plan|exec] [--agent <kind>] [--no-plan] [--no-focus]
 
   --phase plan (default)  lay out panes only, start no agents
+  --agent <kind>          default claude. anything herdr can start (codex, …)
   --exec                  start one session per repo, name them, and inject the PLAN.md contract
 
 Layout (3 repos, PLAN.md present)
@@ -71,8 +73,8 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-[ -n "$NAME" ] || { say "Usage: grove open <name> [--phase plan|exec] [--agent claude|codex]" \
-                        "사용법: grove open <작업명> [--phase plan|exec] [--agent claude|codex]" >&2; exit 1; }
+[ -n "$NAME" ] || { say "Usage: grove open <name> [--phase plan|exec] [--agent <kind>]" \
+                        "사용법: grove open <작업명> [--phase plan|exec] [--agent <종류>]" >&2; exit 1; }
 case "$PHASE" in plan|exec) ;; *) say "❌ --phase must be plan or exec" "❌ --phase 는 plan 또는 exec" >&2; exit 1 ;; esac
 
 WT="$WT_ROOT/$NAME"
@@ -80,6 +82,21 @@ WT="$WT_ROOT/$NAME"
                   sayf "   available: %s\n" "   목록: %s\n" "$(ls "$WT_ROOT" | tr '\n' ' ')" >&2; exit 1; }
 
 command -v herdr >/dev/null || { say "❌ herdr is not installed" "❌ herdr 미설치" >&2; exit 1; }
+
+# 에이전트마다 받는 플래그가 다름. herdr 는 22종을 띄울 수 있지만 CLI 인자는 제각각임
+#   claude  --name(세션 이름) · --add-dir
+#   codex   --add-dir 만 (--name 없음)
+#   그 외   모르는 플래그를 넘기면 기동 자체가 실패하므로 아무것도 안 넘김
+# herdr 쪽 세션 이름은 `agent start <NAME>` 이 따로 잡아주므로 --name 이 없어도
+# grove tell 은 동작함 (대상은 cwd 로 찾음)
+agent_args() {
+    local session="$1"; shift          # 나머지는 --add-dir 짝
+    case "$AGENT" in
+        claude) printf '%s\n' --name "$session" "$@" ;;
+        codex)  printf '%s\n' "$@" ;;
+        *)      : ;;
+    esac
+}
 
 # 레포 담당 세션에 주입할 계약 프롬프트
 contract_prompt() {
@@ -168,8 +185,9 @@ print(last or '')
         echo "  $anchor  ←  $r"
         if [ "$PHASE" = "exec" ]; then
             session="$NAME-$r"
+            extra=(); while IFS= read -r x; do extra+=("$x"); done < <(agent_args "$session")
             if herdr agent start "$session" --kind "$AGENT" --pane "$anchor" \
-                    -- --name "$session" >/dev/null 2>&1; then
+                    -- "${extra[@]+"${extra[@]}"}" >/dev/null 2>&1; then
                 herdr agent prompt "$session" "$(contract_prompt "$r")" >/dev/null 2>&1 \
                     && sayf "     ✅ %s started (session: %s)\n" "     ✅ %s 기동 (세션명: %s)\n" "$AGENT" "$session" \
                     || say  "     ⚠️  started, but the prompt did not go through" "     ⚠️  기동은 됐으나 프롬프트 주입 실패"
@@ -222,14 +240,16 @@ if [ "$PHASE" = "plan" ]; then
     target="${shell_pane:-$root_pane}"
     add_dirs=()
     while IFS= read -r d; do add_dirs+=(--add-dir "$d"); done < <(grove_repo_paths)
-    if herdr agent start "$NAME-plan" --kind claude --pane "$target" \
-            -- --name "$NAME-plan" "${add_dirs[@]+"${add_dirs[@]}"}" >/dev/null 2>&1; then
+    extra=(); while IFS= read -r x; do extra+=("$x"); done \
+        < <(agent_args "$NAME-plan" "${add_dirs[@]+"${add_dirs[@]}"}")
+    if herdr agent start "$NAME-plan" --kind "$AGENT" --pane "$target" \
+            -- "${extra[@]+"${extra[@]}"}" >/dev/null 2>&1; then
         echo
         sayf "  Planning session started: %s-plan  (can read the origin repos)\n" "  계획 세션 기동: %s-plan  (레포 원본 읽기 권한 포함)\n" "$NAME"
     else
         echo
         say "  ⚠️  could not start the planning session — run it yourself:" "  ⚠️  계획 세션 자동 기동 실패 — 직접 실행:"
-        echo "     claude --name $NAME-plan ${add_dirs[*]+"${add_dirs[*]}"}"
+        echo "     $AGENT ${add_dirs[*]+"${add_dirs[*]}"}"
     fi
     echo
     say "Planning phase — per-repo agents are not up yet." "계획 단계 — 레포 담당 에이전트는 아직 안 띄웠음"
@@ -247,8 +267,9 @@ for ((i = 0; i < n; i++)); do
     session="$NAME-$repo"
 
     # --name 으로 세션 이름을 박아둬야 나중에 다른 세션에서 지목해 메시지를 보낼 수 있음
+    extra=(); while IFS= read -r x; do extra+=("$x"); done < <(agent_args "$session")
     if ! herdr agent start "$session" --kind "$AGENT" --pane "${panes[$i]}" \
-            -- --name "$session" >/dev/null 2>&1; then
+            -- "${extra[@]+"${extra[@]}"}" >/dev/null 2>&1; then
         sayf "  ⚠️  %s failed to start — run \`%s\` in that pane yourself\n" "  ⚠️  %s 기동 실패 — 해당 페인에서 직접 \`%s\` 실행\n" "$repo" "$AGENT"
         continue
     fi
