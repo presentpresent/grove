@@ -31,6 +31,7 @@ grove — 한 작업에 여러 레포를 모아 심는 자리
   grove rm   <작업명> [옵션]                                     아카이브 + 제거
   grove export <작업명>                                          회고 draft 사후 생성
   grove init [--dry-run] [--yes]                                 이 머신에 맞춰 설정 생성
+  grove tell <작업명> [메시지]                                   레포 세션 전부에 통지
 
 브랜치 이름은 GROVE_BRANCH 템플릿을 따름 (현재 $GROVE_BRANCH).
 --hotfix 는 --type hotfix 축약. 경로·레포 검색 경로·casebook 도 설정에서 바꿈.
@@ -48,6 +49,7 @@ grove — plant several repos in one worktree
   grove rm   <name> [options]                                  archive and remove
   grove export <name>                                          write a retrospective draft
   grove init [--dry-run] [--yes]                               detect this machine, write config
+  grove tell <name> [message]                                  notify every repo session
 
 Branch names follow the GROVE_BRANCH template (currently $GROVE_BRANCH).
 --hotfix is short for --type hotfix. Paths, repo search paths and casebook
@@ -92,11 +94,19 @@ case "$cmd" in
     # 셸 완성이 후보를 물어볼 때 씀. 사람이 칠 일은 없음
     types)   printf '%s\n' ${GROVE_TYPES//,/ } ;;
     repos)   grove_find_repo '*' | while IFS= read -r p; do basename "$p"; done | sort -u ;;
+    paths)   case "${1:-}" in
+                 root)    printf '%s\n' "$GROVE_ROOT" ;;
+                 trees)   printf '%s\n' "$GROVE_TREES" ;;
+                 archive) printf '%s\n' "$GROVE_ARCHIVE" ;;
+                 repos)   grove_repo_paths ;;
+                 *)       printf 'root=%s\ntrees=%s\narchive=%s\n' "$GROVE_ROOT" "$GROVE_TREES" "$GROVE_ARCHIVE" ;;
+             esac ;;
 
     ls|list) exec "$LIB/list" "$@" ;;
     rm)      exec "$LIB/rm" "$@" ;;
     export)  exec "$LIB/export" "$@" ;;
     init)    exec "$LIB/init" "$@" ;;
+    tell)    exec "$LIB/tell" "$@" ;;
 
     -h|--help|help) usage 0 ;;
     *) sayf "Unknown command: %s\n" "모르는 서브커맨드: %s\n" "$cmd" >&2; echo; usage 1 ;;

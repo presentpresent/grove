@@ -1,0 +1,128 @@
+#!/bin/bash
+# grove tell — 한 작업의 레포 담당 세션들에게 같은 메시지를 뿌림
+#
+# 계약(PLAN.md)이 바뀌면 각 레포 세션이 그걸 알아야 하는데, 사람이 세션마다
+# 찾아 말하는 건 빠뜨리기 쉬움. 레포 4개면 4번이고, 하나 빠뜨리면 그 레포만
+# 옛 계약대로 계속 만듦 — 이 워크플로에서 제일 비싼 실패임
+#
+# 대상은 세션 이름이 아니라 **cwd** 로 찾음. 이름은 안 붙는 경우가 있지만
+# 경로는 항상 맞음
+
+. "$(cd "$(dirname "$0")" && pwd)/config"
+set -uo pipefail
+
+usage() {
+  if grove_is_ko; then
+    cat <<EOF
+사용법: grove tell <작업명> [메시지] [--all] [--dry-run]
+
+$GROVE_TREES/<작업명>/ 아래에서 도는 레포 담당 세션 전부에게 메시지를 보냄
+메시지를 생략하면 "PLAN.md 를 다시 읽어라" 라는 기본 문구가 나감
+
+옵션:
+  --all       계획 세션에도 보냄 (기본은 레포 세션만)
+  --dry-run   누구에게 갈지만 보여주고 보내지 않음
+
+예: grove tell checkout "계약 바뀜 — PLAN.md 의 응답 스키마 절 다시 볼 것"
+EOF
+  else
+    cat <<EOF
+Usage: grove tell <name> [message] [--all] [--dry-run]
+
+Sends the same message to every per-repo session running under
+$GROVE_TREES/<name>/. With no message, a default "re-read PLAN.md" is sent.
+
+Options:
+  --all       also send to the planning session (default: repo sessions only)
+  --dry-run   show who would receive it, send nothing
+
+Example: grove tell checkout "contract changed — re-read the response schema in PLAN.md"
+EOF
+  fi
+  exit 1
+}
+
+include_plan=0
+dry_run=0
+positional=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --all)     include_plan=1; shift ;;
+    --dry-run) dry_run=1; shift ;;
+    -h|--help) usage ;;
+    *)         positional+=("$1"); shift ;;
+  esac
+done
+set -- "${positional[@]+"${positional[@]}"}"
+
+[ $# -ge 1 ] || usage
+name="$1"; shift
+wt="$GROVE_TREES/$name"
+
+[ -d "$wt" ] || { sayf "❌ No such worktree: %s\n" "❌ 워크트리 없음: %s\n" "$wt" >&2; exit 1; }
+
+message="${1:-}"
+if [ -z "$message" ]; then
+  message="$(say \
+    "PLAN.md at the worktree root has changed. Re-read it, and report whether the part you own is affected. Do not start changing code until you have said what changed for you." \
+    "워크트리 루트의 PLAN.md 가 바뀌었다. 다시 읽고, 네가 맡은 부분에 영향이 있는지 보고해라. 무엇이 달라졌는지 말하기 전에는 코드를 고치지 마라.")"
+fi
+
+command -v herdr >/dev/null 2>&1 || {
+  say "❌ herdr not found — nothing to send to" "❌ herdr 가 없어 보낼 대상이 없음" >&2
+  exit 1
+}
+
+# cwd 로 대상을 고름. 워크트리 루트 = 계획 세션, 그 아래 = 레포 세션
+targets="$(herdr agent list 2>/dev/null | python3 -c '
+import json, os, sys
+try:
+    agents = json.load(sys.stdin)["result"]["agents"]
+except Exception:
+    sys.exit(0)
+wt = sys.argv[1].rstrip("/")
+for a in agents:
+    cwd = (a.get("cwd") or "").rstrip("/")
+    pane = a.get("pane_id")
+    if not pane:
+        continue
+    if cwd == wt:
+        print(f"{pane}\tplan\t{os.path.basename(wt)}")
+    elif cwd.startswith(wt + "/"):
+        rel = cwd[len(wt) + 1:]
+        print(f"{pane}\trepo\t{rel.split(os.sep)[0]}")
+' "$wt")"
+
+[ -n "$targets" ] || {
+  sayf "No sessions running under %s\n" "%s 아래에 도는 세션이 없음\n" "$wt" >&2
+  exit 1
+}
+
+sent=0
+while IFS=$'\t' read -r pane role label; do
+  [ -n "$pane" ] || continue
+  if [ "$role" = plan ] && [ "$include_plan" = 0 ]; then
+    sayf "  skip %-8s %s (planning session; --all to include)\n" "  건너뜀 %-8s %s (계획 세션, --all 이면 포함)\n" "$pane" "$label"
+    continue
+  fi
+  if [ "$dry_run" = 1 ]; then
+    sayf "  would send → %-8s %s\n" "  보낼 대상 → %-8s %s\n" "$pane" "$label"
+    sent=$((sent + 1))
+    continue
+  fi
+  if herdr agent prompt "$pane" "$message" >/dev/null 2>&1; then
+    sayf "  ✅ %-8s %s\n" "  ✅ %-8s %s\n" "$pane" "$label"
+    sent=$((sent + 1))
+  else
+    sayf "  ⚠️  %-8s %s — could not deliver\n" "  ⚠️  %-8s %s — 전달 실패\n" "$pane" "$label"
+  fi
+done <<EOF
+$targets
+EOF
+
+echo
+if [ "$dry_run" = 1 ]; then
+  sayf "%s session(s) would receive it (--dry-run)\n" "%s개 세션이 받을 예정 (--dry-run)\n" "$sent"
+else
+  sayf "Sent to %s session(s)\n" "%s개 세션에 전달\n" "$sent"
+fi
