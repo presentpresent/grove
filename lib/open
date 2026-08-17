@@ -145,7 +145,7 @@ contract_prompt() {
 
 1. 먼저 워크트리 루트의 PLAN.md 를 읽어라 (../PLAN.md). 그게 레포 간 합의된 계약이다.
 2. PLAN.md 중 \`$repo\` 에 해당하는 부분만 구현한다. 다른 레포 디렉토리는 읽기만 하고 절대 수정하지 않는다.
-3. 계약(인터페이스·스키마·필드명)을 바꿔야 한다고 판단되면 임의로 바꾸지 말고 멈춘 뒤 `grove ask "무엇이 왜 필요한지"` 로 계획 세션에 올린다 — 다른 레포가 같은 계약을 보고 있다. 막히거나 확인이 필요한 것도 같은 방법으로 올린다.
+3. 계약(인터페이스·스키마·필드명)을 바꿔야 한다고 판단되면 임의로 바꾸지 말고 멈춘 뒤 `grove ask "한 줄 요약 — 파일:줄"` 로 계획 세션에 올린다 (배경 설명 대신 파일 위치를 적어라. 계획 세션이 직접 읽는다) — 다른 레포가 같은 계약을 보고 있다. 막히거나 확인이 필요한 것도 같은 방법으로 올린다.
 4. 구현 후에는 스스로 검증할 수단(테스트·빌드·타입체크)을 찾아서 돌리고 결과를 보고한다.
 
 지금은 PLAN.md 를 읽고 \`$repo\` 담당 범위를 요약해서 알려줘. 구현은 그 다음에 시작한다.
@@ -156,7 +156,7 @@ This worktree is the '$NAME' task, and you own the \`$repo\` repo only.
 
 1. Read PLAN.md at the worktree root first (../PLAN.md). That is the agreed contract between repos.
 2. Implement only the part of PLAN.md that belongs to \`$repo\`. Other repo directories are read-only — never edit them.
-3. If you think the contract (interface, schema, field names) has to change, do not change it. Stop and run `grove ask "what you need and why"` to raise it with the planning session — other repos are working against the same contract. Use the same command whenever you are blocked or need a decision.
+3. If you think the contract (interface, schema, field names) has to change, do not change it. Stop and run `grove ask "one line — file:line"` to raise it with the planning session (cite the location instead of explaining; it can read the code itself) — other repos are working against the same contract. Use the same command whenever you are blocked or need a decision.
 4. After implementing, find a way to verify yourself (tests, build, typecheck), run it, and report the result.
 
 For now, read PLAN.md and summarise the scope that falls to \`$repo\`. Implementation starts after that.
