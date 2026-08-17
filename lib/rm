@@ -189,6 +189,28 @@ else
   echo "Use 'rm -rf $wt_dir' to force removal."
 fi
 
+# 자기가 만든 herdr 워크스페이스 정리
+# grove open 이 <작업명> 라벨로 만들어두므로 라벨이 정확히 일치하는 것만 닫음.
+# 안 지우면 죽은 디렉토리를 가리키는 껍데기가 계속 쌓임
+if command -v herdr >/dev/null 2>&1; then
+  ws_id="$(herdr workspace list 2>/dev/null | python3 -c '
+import json, sys
+try:
+    for w in json.load(sys.stdin)["result"]["workspaces"]:
+        if w.get("label") == sys.argv[1]:
+            print(w["workspace_id"]); break
+except Exception:
+    pass
+' "$name")"
+  if [ -n "$ws_id" ]; then
+    if herdr workspace close "$ws_id" >/dev/null 2>&1; then
+      sayf "Closed herdr workspace: %s\n" "herdr 워크스페이스 정리: %s\n" "$name"
+    else
+      sayf "Warning: could not close herdr workspace %s\n" "경고: herdr 워크스페이스 %s 를 못 닫음\n" "$name"
+    fi
+  fi
+fi
+
 # Try to delete merged local branches
 if [[ "$keep_branches" == false ]]; then
   echo ""

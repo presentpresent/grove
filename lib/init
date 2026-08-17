@@ -337,7 +337,12 @@ for m in herdr tmux zellij; do
   if command -v "$m" >/dev/null 2>&1; then mux="$m"; break; fi
 done
 if [ -n "$mux" ]; then
-  sayf "  found %s → grove open will use it\n" "  %s 감지됨 → grove open 이 이걸 씀\n" "$mux"
+  if [ "$mux" = herdr ]; then
+    say "  herdr found → grove open will lay out panes and start agents" "  herdr 감지됨 → grove open 이 페인 배치와 세션 기동까지 함"
+  else
+    sayf "  found %s, but grove open only drives herdr\n" "  %s 를 찾았지만 grove open 은 herdr 만 다룸\n" "$mux"
+    say  "  Other commands work regardless; install herdr for the screen layout." "  나머지 명령은 그대로 동작함. 화면 배치를 쓰려면 herdr 를 설치할 것"
+  fi
 else
   say "  none found. grove open will just print guidance (other commands still work)" "  못 찾았음. grove open 은 안내만 하고 끝남 (나머지 명령은 그대로 동작)"
   say "  With herdr it also starts one AI session per repo." "  herdr 를 쓰면 레포별 AI 세션까지 자동으로 붙음"

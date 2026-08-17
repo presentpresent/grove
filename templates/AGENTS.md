@@ -19,12 +19,20 @@ repo directories are there so you can read them — never write to them.
 ## The contract is not yours to change
 
 If you conclude that an interface, schema or field name in PLAN.md has to
-change, **stop and report it**. Do not change it and carry on. Other sessions
+change, **stop and raise it**. Do not change it and carry on. Other sessions
 are implementing against the same contract, and a silent change breaks them in
 ways that surface much later.
 
-Whoever owns the plan updates PLAN.md, and every session picks the change up
-from there.
+```bash
+grove ask "the response needs paidAt but the contract has no such field — may I add it?"
+```
+
+That records the question in `QUESTIONS.md` and notifies the planning session.
+Use it whenever you are blocked or need a decision, not only for contract
+changes — a question sitting unread in your own pane blocks the whole task.
+
+The planning session answers, and if the answer changes the contract it updates
+PLAN.md. That change is broadcast to every repo session automatically.
 
 ## Verify your own work
 

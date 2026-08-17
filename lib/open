@@ -9,9 +9,10 @@ set -euo pipefail
 usage() {
   if grove_is_ko; then
     cat <<'EOF'
-사용법: grove open <작업명> [--phase plan|exec] [--agent claude|codex] [--no-plan] [--no-focus]
+사용법: grove open <작업명> [--phase plan|exec] [--agent <종류>] [--no-plan] [--no-focus]
 
   --phase plan (기본)  페인만 깖. 에이전트는 안 띄움
+  --agent <종류>       기본 claude. herdr 가 띄울 수 있는 것 아무거나 (codex 등)
   --exec               레포별 세션 기동 + 세션 이름 지정 + PLAN.md 계약 프롬프트 주입
 
 레이아웃 (레포 3개, PLAN.md 있음)
@@ -30,9 +31,10 @@ exec 단계에서 각 세션은 `<작업명>-<레포명>` 이름을 가짐. 계�
 EOF
   else
     cat <<'EOF'
-Usage: grove open <name> [--phase plan|exec] [--agent claude|codex] [--no-plan] [--no-focus]
+Usage: grove open <name> [--phase plan|exec] [--agent <kind>] [--no-plan] [--no-focus]
 
   --phase plan (default)  lay out panes only, start no agents
+  --agent <kind>          default claude. anything herdr can start (codex, …)
   --exec                  start one session per repo, name them, and inject the PLAN.md contract
 
 Layout (3 repos, PLAN.md present)
@@ -71,15 +73,68 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-[ -n "$NAME" ] || { say "Usage: grove open <name> [--phase plan|exec] [--agent claude|codex]" \
-                        "사용법: grove open <작업명> [--phase plan|exec] [--agent claude|codex]" >&2; exit 1; }
+[ -n "$NAME" ] || { say "Usage: grove open <name> [--phase plan|exec] [--agent <kind>]" \
+                        "사용법: grove open <작업명> [--phase plan|exec] [--agent <종류>]" >&2; exit 1; }
 case "$PHASE" in plan|exec) ;; *) say "❌ --phase must be plan or exec" "❌ --phase 는 plan 또는 exec" >&2; exit 1 ;; esac
 
 WT="$WT_ROOT/$NAME"
 [ -d "$WT" ] || { sayf "❌ No such worktree: %s\n" "❌ 워크트리 없음: %s\n" "$WT" >&2
                   sayf "   available: %s\n" "   목록: %s\n" "$(ls "$WT_ROOT" | tr '\n' ' ')" >&2; exit 1; }
 
+# 페인 자동 배치는 herdr 만 지원함. GROVE_MUX 가 다른 값이면 설정이 조용히
+# 무시되는 게 아니라 그렇다고 말해줌
+if [ "${GROVE_MUX:-herdr}" != "herdr" ]; then
+    sayf "❌ GROVE_MUX=%s — only herdr can lay out panes\n" "❌ GROVE_MUX=%s — 페인 자동 배치는 herdr 만 됨\n" "$GROVE_MUX" >&2
+    say  "   Other grove commands work regardless." "   나머지 grove 명령은 그대로 동작함" >&2
+    exit 1
+fi
 command -v herdr >/dev/null || { say "❌ herdr is not installed" "❌ herdr 미설치" >&2; exit 1; }
+
+# PLAN.md 의 "실행 설정" 표에서 레포별 모델·노력을 읽음.
+#
+#   ## 실행 설정
+#   | 레포 | 모델 | 노력 |
+#   |---|---|---|
+#   | api-server | opus | high |
+#
+# 어느 레포가 어려운지 아는 건 계획 세션뿐이라, 결정을 거기 두고 여기서 읽음.
+# 표가 없거나 파싱이 안 되면 빈 값 → 세션 기본 모델·노력이 그대로 쓰임 (안전한 실패)
+exec_conf() {   # exec_conf <레포> → "모델<TAB>노력"
+    [ -f "$WT/PLAN.md" ] || return 0
+    awk -F'|' -v repo="$1" '
+        /^##+[ \t]*(실행 설정|Exec settings)/ { inside = 1; next }
+        /^##[ \t]/ && inside                  { inside = 0 }
+        inside && NF >= 4 {
+            for (i = 2; i <= 4; i++) gsub(/^[ \t]+|[ \t]+$/, "", $i)
+            if ($2 == repo) { print $3 "\t" $4; exit }
+        }' "$WT/PLAN.md" 2>/dev/null
+}
+
+# 에이전트마다 받는 플래그가 다름. herdr 는 22종을 띄울 수 있지만 CLI 인자는 제각각임
+#   claude  --name(세션 이름) · --add-dir · --model · --effort
+#   codex   --add-dir · -m (이름·노력 옵션 없음)
+#   그 외   모르는 플래그를 넘기면 기동 자체가 실패하므로 아무것도 안 넘김
+# herdr 쪽 세션 이름은 `agent start <NAME>` 이 따로 잡아주므로 --name 이 없어도
+# grove tell 은 동작함 (대상은 cwd 로 찾음)
+#
+# 모델·노력은 호출 전에 EXEC_MODEL·EXEC_EFFORT 로 넘김 (비어 있으면 안 붙임)
+agent_args() {
+    local session="$1"; shift          # 나머지는 --add-dir 짝
+    case "$AGENT" in
+        claude)
+            printf '%s\n' --name "$session"
+            [ -n "${EXEC_MODEL:-}" ]  && printf '%s\n' --model "$EXEC_MODEL"
+            [ -n "${EXEC_EFFORT:-}" ] && printf '%s\n' --effort "$EXEC_EFFORT"
+            printf '%s\n' "$@"
+            ;;
+        codex)
+            [ -n "${EXEC_MODEL:-}" ] && printf '%s\n' -m "$EXEC_MODEL"
+            printf '%s\n' "$@"
+            ;;
+        *) : ;;
+    esac
+    return 0
+}
 
 # 레포 담당 세션에 주입할 계약 프롬프트
 contract_prompt() {
@@ -90,7 +145,7 @@ contract_prompt() {
 
 1. 먼저 워크트리 루트의 PLAN.md 를 읽어라 (../PLAN.md). 그게 레포 간 합의된 계약이다.
 2. PLAN.md 중 \`$repo\` 에 해당하는 부분만 구현한다. 다른 레포 디렉토리는 읽기만 하고 절대 수정하지 않는다.
-3. 계약(인터페이스·스키마·필드명)을 바꿔야 한다고 판단되면 임의로 바꾸지 말고 멈춘 뒤 보고한다 — 다른 레포가 같은 계약을 보고 있다.
+3. 계약(인터페이스·스키마·필드명)을 바꿔야 한다고 판단되면 임의로 바꾸지 말고 멈춘 뒤 `grove ask "무엇이 왜 필요한지"` 로 계획 세션에 올린다 — 다른 레포가 같은 계약을 보고 있다. 막히거나 확인이 필요한 것도 같은 방법으로 올린다.
 4. 구현 후에는 스스로 검증할 수단(테스트·빌드·타입체크)을 찾아서 돌리고 결과를 보고한다.
 
 지금은 PLAN.md 를 읽고 \`$repo\` 담당 범위를 요약해서 알려줘. 구현은 그 다음에 시작한다.
@@ -101,7 +156,7 @@ This worktree is the '$NAME' task, and you own the \`$repo\` repo only.
 
 1. Read PLAN.md at the worktree root first (../PLAN.md). That is the agreed contract between repos.
 2. Implement only the part of PLAN.md that belongs to \`$repo\`. Other repo directories are read-only — never edit them.
-3. If you think the contract (interface, schema, field names) has to change, do not change it. Stop and report — other repos are working against the same contract.
+3. If you think the contract (interface, schema, field names) has to change, do not change it. Stop and run `grove ask "what you need and why"` to raise it with the planning session — other repos are working against the same contract. Use the same command whenever you are blocked or need a decision.
 4. After implementing, find a way to verify yourself (tests, build, typecheck), run it, and report the result.
 
 For now, read PLAN.md and summarise the scope that falls to \`$repo\`. Implementation starts after that.
@@ -168,8 +223,9 @@ print(last or '')
         echo "  $anchor  ←  $r"
         if [ "$PHASE" = "exec" ]; then
             session="$NAME-$r"
+            extra=(); while IFS= read -r x; do extra+=("$x"); done < <(agent_args "$session")
             if herdr agent start "$session" --kind "$AGENT" --pane "$anchor" \
-                    -- --name "$session" >/dev/null 2>&1; then
+                    -- "${extra[@]+"${extra[@]}"}" >/dev/null 2>&1; then
                 herdr agent prompt "$session" "$(contract_prompt "$r")" >/dev/null 2>&1 \
                     && sayf "     ✅ %s started (session: %s)\n" "     ✅ %s 기동 (세션명: %s)\n" "$AGENT" "$session" \
                     || say  "     ⚠️  started, but the prompt did not go through" "     ⚠️  기동은 됐으나 프롬프트 주입 실패"
@@ -222,14 +278,16 @@ if [ "$PHASE" = "plan" ]; then
     target="${shell_pane:-$root_pane}"
     add_dirs=()
     while IFS= read -r d; do add_dirs+=(--add-dir "$d"); done < <(grove_repo_paths)
-    if herdr agent start "$NAME-plan" --kind claude --pane "$target" \
-            -- --name "$NAME-plan" "${add_dirs[@]+"${add_dirs[@]}"}" >/dev/null 2>&1; then
+    extra=(); while IFS= read -r x; do extra+=("$x"); done \
+        < <(agent_args "$NAME-plan" "${add_dirs[@]+"${add_dirs[@]}"}")
+    if herdr agent start "$NAME-plan" --kind "$AGENT" --pane "$target" \
+            -- "${extra[@]+"${extra[@]}"}" >/dev/null 2>&1; then
         echo
         sayf "  Planning session started: %s-plan  (can read the origin repos)\n" "  계획 세션 기동: %s-plan  (레포 원본 읽기 권한 포함)\n" "$NAME"
     else
         echo
         say "  ⚠️  could not start the planning session — run it yourself:" "  ⚠️  계획 세션 자동 기동 실패 — 직접 실행:"
-        echo "     claude --name $NAME-plan ${add_dirs[*]+"${add_dirs[*]}"}"
+        echo "     $AGENT ${add_dirs[*]+"${add_dirs[*]}"}"
     fi
     echo
     say "Planning phase — per-repo agents are not up yet." "계획 단계 — 레포 담당 에이전트는 아직 안 띄웠음"
@@ -247,14 +305,19 @@ for ((i = 0; i < n; i++)); do
     session="$NAME-$repo"
 
     # --name 으로 세션 이름을 박아둬야 나중에 다른 세션에서 지목해 메시지를 보낼 수 있음
+    EXEC_MODEL=""; EXEC_EFFORT=""
+    IFS=$'\t' read -r EXEC_MODEL EXEC_EFFORT < <(exec_conf "$repo")
+    extra=(); while IFS= read -r x; do extra+=("$x"); done < <(agent_args "$session")
     if ! herdr agent start "$session" --kind "$AGENT" --pane "${panes[$i]}" \
-            -- --name "$session" >/dev/null 2>&1; then
+            -- "${extra[@]+"${extra[@]}"}" >/dev/null 2>&1; then
         sayf "  ⚠️  %s failed to start — run \`%s\` in that pane yourself\n" "  ⚠️  %s 기동 실패 — 해당 페인에서 직접 \`%s\` 실행\n" "$repo" "$AGENT"
         continue
     fi
 
     if herdr agent prompt "$session" "$(contract_prompt "$repo")" >/dev/null 2>&1; then
-        sayf "  ✅ %s  (session: %s)\n" "  ✅ %s  (세션명: %s)\n" "$repo" "$session"
+        tag=""
+        [ -n "$EXEC_MODEL" ] || [ -n "$EXEC_EFFORT" ] && tag=" [${EXEC_MODEL:-default}${EXEC_EFFORT:+/$EXEC_EFFORT}]"
+        sayf "  ✅ %s  (session: %s)%s\n" "  ✅ %s  (세션명: %s)%s\n" "$repo" "$session" "$tag"
     else
         sayf "  ⚠️  %s started, but the prompt did not go through — instruct it in that pane\n" "  ⚠️  %s 기동은 됐으나 프롬프트 주입 실패 — 해당 페인에 직접 지시\n" "$repo"
     fi
