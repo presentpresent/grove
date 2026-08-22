@@ -1,0 +1,129 @@
+#!/bin/bash
+# grove status — 한 작업의 진행 상황을 한 화면에 요약
+#
+# PLAN.md 가 수백 줄로 자라면 "지금 전체적으로 어디까지 왔나" 를 알려고 문서를
+# 통째로 읽게 됨. 그건 문서가 커진 탓이지 사람 탓이 아님. 코드와 문서에서
+# 세어서 나오는 것만 뽑아 보여줌 — 판단은 안 하고 숫자만 냄
+#
+# 코드가 진실이므로 git 을 먼저 보고, 문서는 보조로 씀
+
+. "$(cd "$(dirname "$0")" && pwd)/config"
+set -uo pipefail
+
+usage() {
+  if grove_is_ko; then
+    cat <<EOF
+사용법: grove status [<작업명>]
+
+작업명을 생략하면 워크트리 안에서 cwd 로 알아냄
+
+레포별로 브랜치·커밋 수·미커밋 변경·PR 상태를, 문서에서 체크리스트 진행률과
+미답 질문 수를 뽑음. PLAN.md 를 안 읽고 "지금 어디까지" 를 아는 용도
+EOF
+  else
+    cat <<EOF
+Usage: grove status [<name>]
+
+With no name, works it out from cwd inside a worktree.
+
+Per repo: branch, commits ahead, uncommitted changes, PR state. From the docs:
+checklist progress and unanswered questions. Enough to know where things stand
+without reading PLAN.md.
+EOF
+  fi
+  exit 1
+}
+
+case "${1:-}" in -h|--help) usage ;; esac
+
+name="${1:-}"
+if [ -z "$name" ]; then
+    here="$(pwd -P)"
+    trees="$(cd "$GROVE_TREES" 2>/dev/null && pwd -P)" || trees="$GROVE_TREES"
+    case "$here" in
+        "$trees"/*) rel="${here#"$trees"/}"; name="${rel%%/*}" ;;
+    esac
+fi
+[ -n "$name" ] || { say "❌ Not inside a worktree — pass a name" "❌ 워크트리 안이 아님 — 작업명을 줄 것" >&2; exit 1; }
+
+wt="$GROVE_TREES/$name"
+[ -d "$wt" ] || { sayf "❌ No such worktree: %s\n" "❌ 워크트리 없음: %s\n" "$wt" >&2; exit 1; }
+
+# ── 헤더 ──
+# BSD find 에는 -newermt 가 없음. mtime 을 직접 뽑아 최댓값을 씀
+last_touch="$(stat -f '%m' "$wt"/*.md 2>/dev/null | sort -rn | head -1)"
+if [ -n "$last_touch" ]; then
+    days=$(( ( $(date +%s) - last_touch ) / 86400 ))
+    sayf "%s — last touched %s day(s) ago\n" "%s — 마지막 손댄 지 %s일\n" "$name" "$days"
+else
+    printf '%s\n' "$name"
+fi
+echo
+
+# ── 레포별 ──
+say "REPO                     BRANCH                          AHEAD  DIRTY  PR" \
+    "레포                      브랜치                           커밋   변경   PR"
+printf '%s\n' "----------------------------------------------------------------------"
+for d in "$wt"/*/; do
+    [ -e "${d}.git" ] || continue
+    repo="$(basename "$d")"
+    br="$(git -C "$d" branch --show-current 2>/dev/null)"
+    # origin/HEAD 대비 앞선 커밋. 없으면 upstream, 그것도 없으면 '-'
+    ahead="$(git -C "$d" rev-list --count "origin/HEAD..HEAD" 2>/dev/null \
+             || git -C "$d" rev-list --count "@{u}..HEAD" 2>/dev/null || echo -)"
+    dirty="$(git -C "$d" status --porcelain 2>/dev/null | grep -c . || true)"
+    [ "$dirty" = 0 ] && dirty="·"
+    pr="·"
+    if command -v gh >/dev/null 2>&1 && [ -n "$br" ]; then
+        slug="$(git -C "$d" remote get-url origin 2>/dev/null \
+                | sed -E 's#\.git$##; s#.*[:/]([^/]+/[^/]+)$#\1#')"
+        pr="$(gh pr list --repo "$slug" \
+              --head "$br" --state all --json number,state \
+              --jq '.[0] | if . then "#\(.number) \(.state|ascii_downcase)" else "·" end' 2>/dev/null || echo '·')"
+        [ -z "$pr" ] && pr="·"
+    fi
+    printf '%-24.24s %-30.30s %5s  %5s  %s\n' "$repo" "$br" "$ahead" "$dirty" "$pr"
+done
+echo
+
+# ── 문서 ──
+docs_line() { # docs_line <파일> <라벨>
+    [ -f "$wt/$1" ] || return 0
+    local total done_
+    # grep -c 는 0건일 때도 "0" 을 찍고 exit 1 함. `|| echo 0` 을 붙이면 "0\n0" 이
+    # 되어 산술 확장이 깨짐. 파일 존재는 위에서 확인했으므로 그냥 받으면 됨
+    total=$(grep -cE '^\s*- \[( |x|X)\] ' "$wt/$1" 2>/dev/null); total=${total:-0}
+    done_=$(grep -cE '^\s*- \[[xX]\] ' "$wt/$1" 2>/dev/null); done_=${done_:-0}
+    [ "$total" = 0 ] && return 0
+    printf '  %-18s %s/%s  (%s%%)  %s줄\n' "$2" "$done_" "$total" \
+        "$(( done_ * 100 / total ))" "$(wc -l < "$wt/$1" | tr -d ' ')"
+}
+say "DOCS" "문서"
+# 진행률은 해야 할 일을 담는 문서에서만 의미가 있음
+for f in PLAN.md MERGE_REQUESTS.md; do docs_line "$f" "$f"; done
+for f in DESIGN.md PITFALLS.md; do
+    [ -f "$wt/$f" ] && printf '  %-18s %s줄\n' "$f" "$(wc -l < "$wt/$f" | tr -d ' ')"
+done
+
+# ── 미답 질문 ──
+if [ -f "$wt/QUESTIONS.md" ]; then
+    q=$(grep -cE '^- \*\*\[' "$wt/QUESTIONS.md" 2>/dev/null); q=${q:-0}
+    if [ "$q" -gt 0 ]; then
+        echo
+        sayf "❓ %s question(s) in QUESTIONS.md\n" "❓ QUESTIONS.md 에 질문 %s건\n" "$q"
+        grep -E '^- \*\*\[' "$wt/QUESTIONS.md" | tail -3 | sed 's/^- \*\*/   /; s/\*\*//' | cut -c1-100
+    fi
+fi
+
+# ── 세션 ──
+if command -v herdr >/dev/null 2>&1; then
+    n=$(herdr agent list 2>/dev/null | python3 -c '
+import json,sys
+try: a=json.load(sys.stdin)["result"]["agents"]
+except Exception: print(0); sys.exit()
+wt=sys.argv[1].rstrip("/")
+print(sum(1 for x in a if (x.get("cwd") or "").rstrip("/").startswith(wt)))
+' "$wt" 2>/dev/null || echo 0)
+    echo
+    sayf "%s session(s) running\n" "세션 %s개 도는 중\n" "$n"
+fi
