@@ -1,6 +1,6 @@
 {
   "name": "@presentpresent/grove",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Multi-repo git worktree orchestrator — plant several repos in one workspace and give each its own AI session. English and Korean.",
   "bin": {
     "grove": "grove"
