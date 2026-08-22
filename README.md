@@ -48,12 +48,68 @@ grove rm checkout-redesign              # archive docs, remove worktrees, prune 
 | `rm` | Archive → remove worktrees → delete merged branches |
 | `export` | Generate a retrospective draft from finished work |
 | `init` | Detect this machine's setup and write a config |
+| `status` | One-screen summary: per-repo branch, commits, PR state, checklist progress |
+| `tell` | Notify every repo session (or one, with `--to`) |
+| `ask` | Raise a question from a repo session to the planning session |
+
+## Knowing where things stand
+
+```bash
+grove status checkout-redesign
+```
+
+```
+checkout-redesign — last touched 0 day(s) ago
+
+REPO                     BRANCH                          AHEAD  DIRTY  PR
+----------------------------------------------------------------------
+api-server               feature/checkout-redesign          18     ·  #1539 merged
+web-bff                  feature/checkout-redesign-p4       12     ·  #3245 merged
+web-client               feature/checkout-redesign           5     3  #44 open
+
+DOCS
+  PLAN.md            43/82  (52%)  120 lines
+  PITFALLS.md        538 lines
+
+5 session(s) running
+```
+
+It counts, it does not judge. git comes first and the docs second, because the
+code is the truth.
 
 ## PLAN.md is the contract
 
 Per-repo AI sessions can't see each other. The `PLAN.md` at the worktree root is what they share: the planning session writes the contract there, and each repo session reads it and does its part. Change the plan mid-flight and every session picks it up from the same place.
 
 `grove rm` moves that PLAN.md into an archive rather than deleting it, so months later you can still answer "why did we do it that way".
+
+### Two channels, both automatic
+
+The planning session and the repo sessions can't see each other's context, so
+grove gives them two directions:
+
+| | |
+|---|---|
+| `grove tell <task> [msg]` | plan → every repo session. `--to <repo>` for just one |
+| `grove ask "<question>"` | repo → plan. Records it in `QUESTIONS.md` and notifies |
+
+`hooks/plan-notify.sh` makes the first one automatic: edit the **contract
+section** of PLAN.md and every repo session is sent the diff. Only that section
+is watched — ticking a checklist should not wake five sessions.
+
+### Split the docs before they get long
+
+One file that mixes the living contract with accumulated history means hunting
+for today's 40 lines inside several hundred. Once PLAN.md passes ~300 lines,
+split it by how often each part changes:
+
+| | |
+|---|---|
+| `PLAN.md` | contract, checklist, deploy order, what is still blocked — **read daily** |
+| `DESIGN.md` | why these choices — written once |
+| `PITFALLS.md` | traps, verification records, decision log — read when stuck |
+
+Leave a one-line pointer where content moved out.
 
 ## Configuration
 
